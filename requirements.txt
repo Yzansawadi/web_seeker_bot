@@ -4,3 +4,4 @@ openpyxl>=3.0
 requests>=2.28
 beautifulsoup4>=4.11
 reportlab>=3.6
+python-telegram-bot==20.7
