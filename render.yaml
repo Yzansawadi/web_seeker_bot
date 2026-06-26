@@ -1,6 +1,14 @@
 services:
-  - type: worker
-    name: iust-telegram-bot
+  - type: web
+    name: iust-schedule-bot
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python3 bot.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      - key: IUST_BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
