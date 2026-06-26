@@ -68,13 +68,27 @@ import pdf_export  # noqa: E402
 class FakeMessage:
     def __init__(self):
         self.chat_id = 12345
+        self.last_text = None
+
+    async def reply_text(self, text, reply_markup=None, **kwargs):
+        self.last_text = text
+        print("[رد على رسالة]")
+        print(text)
+
+
+class FakeUpdate:
+    def __init__(self, user_id=999):
+        self.message = FakeMessage()
+        self.effective_user = types.SimpleNamespace(
+            id=user_id, full_name="مستخدم تجريبي", username="test_user"
+        )
 
 
 class FakeQuery:
     def __init__(self, data, user_id=999):
         self.data = data
         self.message = FakeMessage()
-        self.from_user = types.SimpleNamespace(id=user_id)
+        self.from_user = types.SimpleNamespace(id=user_id, full_name="مستخدم تجريبي", username="test_user")
         self.last_text = None
         self.last_markup = None
 
@@ -233,6 +247,31 @@ async def main():
     print(f"التحميل الأول: {first_ms:.2f} مللي ثانية | التحميل الثاني (كاش): {second_ms:.3f} مللي ثانية")
     assert second_ms < first_ms / 5, "التخزين المؤقت لا يبدو فعالًا كما هو متوقع"
     print("\nنجح: التخزين المؤقت يسرّع التحميلات اللاحقة بشكل كبير.\n")
+
+    print("=" * 70)
+    print("اختبار 7: تتبّع المستخدمين الفريدين وأمر /stats")
+    print("=" * 70)
+    bot.seen_users.clear()
+    bot.user_sessions.clear()
+
+    fake_update_1 = FakeUpdate(user_id=111)
+    await bot.start(fake_update_1, ctx)
+    assert 111 in bot.seen_users, "المستخدم الأول لم يُسجَّل في seen_users"
+
+    fake_update_2 = FakeUpdate(user_id=222)
+    await bot.start(fake_update_2, ctx)
+    assert len(bot.seen_users) == 2, f"يجب أن يكون هناك مستخدمان، الموجود: {len(bot.seen_users)}"
+
+    # نفس المستخدم الأول يضغط زرًا -- لا يجب أن يزيد العدد
+    q_repeat = FakeQuery("year:1", user_id=111)
+    await bot.show_year_courses(q_repeat, ctx, 1)
+    bot.track_user(q_repeat.from_user)
+    assert len(bot.seen_users) == 2, "تكرار نفس المستخدم لا يجب أن يزيد العدد"
+
+    stats_update = FakeUpdate(user_id=111)
+    await bot.stats(stats_update, ctx)
+    assert "2" in stats_update.message.last_text, "أمر /stats لم يعرض العدد الصحيح للمستخدمين"
+    print("\nنجح: تتبّع المستخدمين الفريدين وأمر /stats يعملان بشكل صحيح.\n")
 
     print("تم تنفيذ كل الاختبارات بنجاح بدون أي استثناءات أو فشل في التحققات.")
 

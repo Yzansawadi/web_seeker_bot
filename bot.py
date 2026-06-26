@@ -53,6 +53,7 @@ import logging
 import subprocess
 import sys
 import asyncio
+from datetime import datetime, timezone
 
 # على ويندوز، الترميز الافتراضي لنافذة الأوامر (مثل cp1252) لا يدعم الحروف
 # العربية، وهذا يتسبب بانهيار أي print()/logging يحتوي عليها. نفرض هنا
@@ -129,6 +130,23 @@ YEAR_NAMES = {
 #     "selected": [ (year, code), ... ]      # المواد المختارة بترتيب اختيارها
 # }
 user_sessions = {}
+
+# مجموعة بسيطة لتتبّع كل مستخدم فريد تفاعل مع البوت منذ آخر إعادة تشغيل.
+# هذا يُصفَّر عند إعادة تشغيل الخدمة (لأن الذاكرة تُصفَّر)، فهو عدّاد "منذ
+# آخر تشغيل" لا عدّاد دائم. استخدم أمر /stats لرؤية العدد الحالي.
+seen_users = set()
+_bot_start_time = datetime.now(timezone.utc)
+
+
+def track_user(user):
+    """يسجّل المستخدم في عدّاد المستخدمين الفريدين، ويكتب سطرًا في الـ logs
+    عند ظهوره لأول مرة منذ آخر تشغيل، حتى يمكن تتبّع الاستخدام عبر Logs."""
+    is_new = user.id not in seen_users
+    seen_users.add(user.id)
+    if is_new:
+        name = user.full_name or user.username or str(user.id)
+        logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين: %s",
+                    name, user.id, len(seen_users))
 
 
 def get_session(user_id):
@@ -329,12 +347,36 @@ def home_text_and_keyboard(years_data, selected_list, intro_note=""):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    track_user(update.effective_user)
     reset_session(user_id)
     years_data = sd.load_courses()
     text, keyboard = home_text_and_keyboard(
         years_data, [], intro_note="أهلًا بك في بوت جدول IUST.\n\n"
     )
     await update.message.reply_text(text, reply_markup=keyboard)
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    أمر /stats: يعرض عدد المستخدمين الفريدين الذين تفاعلوا مع البوت منذ
+    آخر إعادة تشغيل، ومدة التشغيل الحالية. هذا العدد يُصفَّر تلقائيًا عند
+    أي إعادة تشغيل للخدمة (مثلًا بعد رفع تحديث جديد على GitHub)، لأنه
+    محفوظ في الذاكرة فقط، وليس عدّادًا دائمًا.
+    """
+    uptime = datetime.now(timezone.utc) - _bot_start_time
+    hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+    minutes, _ = divmod(remainder, 60)
+
+    active_sessions = sum(1 for s in user_sessions.values() if s["selected"])
+
+    text = (
+        "إحصائيات البوت (منذ آخر تشغيل):\n\n"
+        f"عدد المستخدمين الفريدين: {len(seen_users)}\n"
+        f"عدد المستخدمين الذين لديهم اختيار غير مكتمل حاليًا: {active_sessions}\n"
+        f"مدة التشغيل الحالية: {hours} ساعة و {minutes} دقيقة\n\n"
+        "ملاحظة: هذا العدد يبدأ من الصفر مع كل إعادة تشغيل للبوت."
+    )
+    await update.message.reply_text(text)
 
 
 async def go_home(query, context, selected_list, intro_note=""):
@@ -554,6 +596,8 @@ async def run_update_schedule(query, context):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
+    track_user(query.from_user)
+    logger.info("ضغطة زر من المستخدم %s: %s", query.from_user.id, data)
 
     if data == "update_cooldown":
         remaining = cooldown_remaining_seconds()
@@ -690,11 +734,13 @@ def main():
             return
         app = Application.builder().token(BOT_TOKEN).updater(None).build()
         app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("stats", stats))
         app.add_handler(CallbackQueryHandler(button_handler))
         asyncio.run(run_webhook_server(app))
     else:
         app = Application.builder().token(BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("stats", stats))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("بدء تشغيل البوت (long polling)...")
         app.run_polling()
