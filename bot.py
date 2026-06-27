@@ -76,6 +76,7 @@ from telegram.ext import (
 
 import schedule_data as sd
 import pdf_export
+import notifier
 
 # uvicorn/starlette مطلوبتان فقط لوضع Webhook (الاستضافة السحابية). إن لم
 # تكونا مثبَّتتين والبوت يعمل محليًا بوضع Polling فقط، لا مشكلة في ذلك --
@@ -147,6 +148,7 @@ def track_user(user):
         name = user.full_name or user.username or str(user.id)
         logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين: %s",
                     name, user.id, len(seen_users))
+        notifier.register_new_user(user.id, user.username, len(seen_users))
 
 
 def get_session(user_id):
@@ -574,6 +576,7 @@ async def run_update_schedule(query, context):
 
     _last_update_ts["value"] = time.time()
     years_data = sd.load_courses(force_reload=True)
+    notifier.notify_update_result(success, error_snippet)
 
     if success:
         note = "تم تحديث الجدول بنجاح بأحدث البيانات من موقع الجامعة.\n\n"
@@ -598,6 +601,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     track_user(query.from_user)
     logger.info("ضغطة زر من المستخدم %s: %s", query.from_user.id, data)
+
+    user_id = query.from_user.id
+    username = query.from_user.username
+
+    # تسجيل الحدث في سجل المستخدم الخاص بالإشعارات (notifier)، بحسب نوع
+    # الضغطة. هذا منفصل تمامًا عن منطق البوت نفسه ولا يؤثر عليه إن فشل.
+    if data == "back_home":
+        notifier.log_event(user_id, username, "back_button")
+    elif data.startswith("year:"):
+        year_value = data.split(":", 1)[1]
+        notifier.log_event(user_id, username, "select_year", year_value)
+    elif data.startswith("course:"):
+        _, year_str, code = data.split(":", 2)
+        years_data_for_log = sd.load_courses()
+        course_for_log = sd.get_course(years_data_for_log, int(year_str), code)
+        course_name = course_for_log["name"] if course_for_log else code
+        notifier.log_event(user_id, username, "select_subject", course_name)
+    elif data.startswith("delete_course:"):
+        notifier.log_event(user_id, username, "delete_subject")
+    elif data == "show_schedule":
+        notifier.log_event(user_id, username, "show_schedule")
 
     if data == "update_cooldown":
         remaining = cooldown_remaining_seconds()
