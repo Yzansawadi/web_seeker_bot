@@ -164,30 +164,35 @@ def _send_new_message(text):
     return result.get("message_id") if result else None
 
 
-def _edit_message(message_id, text):
-    result = _telegram_api(
-        "editMessageText",
-        {"chat_id": NOTIFIER_CHAT_ID, "message_id": message_id, "text": text},
-    )
-    return result is not None
+def _delete_message(message_id):
+    # عدم التحقق من نجاح الحذف عمدًا: إن كانت الرسالة محذوفة مسبقًا أو
+    # قديمة جدًا، فشل الحذف لا يهم -- المهم إرسال الرسالة الجديدة بعده.
+    _telegram_api("deleteMessage", {"chat_id": NOTIFIER_CHAT_ID, "message_id": message_id})
 
 
 def _push_to_telegram(record):
     """
-    يعدّل رسالة المستخدم الموجودة إن أمكن. إن فشل التعديل (مثلًا الرسالة
-    قديمة جدًا، أو حُذفت، أو لم تُرسَل رسالة من قبل)، يرسل رسالة جديدة
-    ويحفظ رقمها الجديد في السجل.
+    يحذف رسالة المستخدم القديمة (إن وُجدت) ويرسل رسالة جديدة بالمحتوى
+    المحدَّث، ويحدّث record['message_id'] في الذاكرة بالقيمة الجديدة.
+
+    لا تحفظ هذه الدالة السجل في Redis بنفسها (الحفظ مسؤولية المستدعي،
+    مرة واحدة بكل التغييرات مجتمعة) لتفادي استدعاء SET مرتين لكل حدث.
+
+    نستخدم حذف+إرسال عمدًا بدل تعديل الرسالة في مكانها: تعديل رسالة
+    قديمة (editMessageText) يُحدّث محتواها فقط، لكنه لا "يرفعها" لأسفل
+    المحادثة أبدًا -- وهذا يعني أن نشاط مستخدم قديم يبقى مخفيًا في أعلى
+    الشات إذا تراكمت رسائل مستخدمين آخرين بعده. حذف الرسالة وإرسال رسالة
+    جديدة بمحتواها يضمن ظهورها دائمًا في آخر المحادثة عند أي نشاط جديد.
     """
-    message_id = record.get("message_id")
+    old_message_id = record.get("message_id")
     text = _build_message_text(record)
 
-    if message_id and _edit_message(message_id, text):
-        return
+    if old_message_id:
+        _delete_message(old_message_id)
 
     new_id = _send_new_message(text)
     if new_id:
         record["message_id"] = new_id
-        save_user_record(record["telegram_id"], record)
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +213,8 @@ def register_new_user(user_id, username, total_users_at_join):
         "events": [],
         "message_id": None,
     }
-    save_user_record(user_id, record)
-    _push_to_telegram(record)
+    _push_to_telegram(record)  # يضبط record["message_id"] في الذاكرة
+    save_user_record(user_id, record)  # حفظ نهائي واحد بكل القيم مجتمعة
 
 
 def log_event(user_id, username, event_type, value=""):
@@ -247,15 +252,16 @@ def log_event(user_id, username, event_type, value=""):
     record.setdefault("events", []).append({"type": event_type, "value": value})
     record["events"] = record["events"][-MAX_EVENTS_KEPT:]
 
-    save_user_record(user_id, record)
-    _push_to_telegram(record)
-
-    # بعد تسجيل حدث "عرض الجدول" نفسه (يظهر في الرسالة)، نفرّغ السجل
-    # ليبدأ نشاط المستخدم القادم من جديد، كما طُلب تحديدًا.
+    # بعد تسجيل حدث "عرض الجدول" نفسه، نفرّغ سجل الأحداث فورًا (في نفس
+    # السجل قبل الحفظ، لا بعده) ليبدأ نشاط المستخدم القادم من جديد، كما
+    # طُلب تحديدًا. هذا يجمع الإضافة والتصفير في عملية حفظ ودفع واحدة فقط
+    # بدل مرتين متتاليتين (توفير فعلي على عدد أوامر Redis وعدد طلبات
+    # تيليغرام لكل ضغطة "عرض الجدول").
     if is_show_schedule:
         record["events"] = []
-        save_user_record(user_id, record)
-        _push_to_telegram(record)
+
+    _push_to_telegram(record)  # يضبط record["message_id"] الجديد في الذاكرة
+    save_user_record(user_id, record)  # حفظ نهائي واحد بكل القيم مجتمعة
 
 
 def notify_update_result(success: bool, detail: str = "") -> None:

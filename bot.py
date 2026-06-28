@@ -148,7 +148,11 @@ def track_user(user):
         name = user.full_name or user.username or str(user.id)
         logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين: %s",
                     name, user.id, len(seen_users))
-        notifier.register_new_user(user.id, user.username, len(seen_users))
+        # يُنفَّذ في الخلفية حتى لا تنتظر استجابة البوت اكتمال طلبات
+        # الشبكة (Upstash + Telegram) الخاصة بإشعار المالك.
+        asyncio.create_task(
+            asyncio.to_thread(notifier.register_new_user, user.id, user.username, len(seen_users))
+        )
 
 
 def get_session(user_id):
@@ -576,7 +580,7 @@ async def run_update_schedule(query, context):
 
     _last_update_ts["value"] = time.time()
     years_data = sd.load_courses(force_reload=True)
-    notifier.notify_update_result(success, error_snippet)
+    asyncio.create_task(asyncio.to_thread(notifier.notify_update_result, success, error_snippet))
 
     if success:
         note = "تم تحديث الجدول بنجاح بأحدث البيانات من موقع الجامعة.\n\n"
@@ -606,22 +610,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = query.from_user.username
 
     # تسجيل الحدث في سجل المستخدم الخاص بالإشعارات (notifier)، بحسب نوع
-    # الضغطة. هذا منفصل تمامًا عن منطق البوت نفسه ولا يؤثر عليه إن فشل.
+    # الضغطة. يُنفَّذ في الخلفية (asyncio.create_task + to_thread) وليس
+    # بانتظار مباشر، لأن notifier.log_event يقوم بطلبات شبكية متزامنة
+    # (Upstash + Telegram) قد تستغرق وقتًا، وانتظارها مباشرة كان يُجمّد
+    # استجابة البوت لكل المستخدمين حتى تكتمل. هذا منفصل تمامًا عن منطق
+    # البوت نفسه ولا يؤثر عليه إن تأخر أو فشل.
+    def _fire_log_event(event_type, value=""):
+        asyncio.create_task(asyncio.to_thread(notifier.log_event, user_id, username, event_type, value))
+
     if data == "back_home":
-        notifier.log_event(user_id, username, "back_button")
+        _fire_log_event("back_button")
     elif data.startswith("year:"):
         year_value = data.split(":", 1)[1]
-        notifier.log_event(user_id, username, "select_year", year_value)
+        _fire_log_event("select_year", year_value)
     elif data.startswith("course:"):
         _, year_str, code = data.split(":", 2)
         years_data_for_log = sd.load_courses()
         course_for_log = sd.get_course(years_data_for_log, int(year_str), code)
         course_name = course_for_log["name"] if course_for_log else code
-        notifier.log_event(user_id, username, "select_subject", course_name)
+        _fire_log_event("select_subject", course_name)
     elif data.startswith("delete_course:"):
-        notifier.log_event(user_id, username, "delete_subject")
+        _fire_log_event("delete_subject")
     elif data == "show_schedule":
-        notifier.log_event(user_id, username, "show_schedule")
+        _fire_log_event("show_schedule")
 
     if data == "update_cooldown":
         remaining = cooldown_remaining_seconds()

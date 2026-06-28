@@ -21,6 +21,7 @@ from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.utils import ImageReader
 
 import schedule_data as sd
 import arabic_text
@@ -28,19 +29,26 @@ import arabic_text
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FONTS_DIR = os.path.join(BASE_DIR, "fonts")
 
-# اسم الخط المسجَّل لدى reportlab (يجب أن يدعم الحروف العربية)
+# اسم الخط العربي المسجَّل لدى reportlab
 FONT_NAME = "Arabic"
 FONT_NAME_BOLD = "Arabic-Bold"
 
+# اسم خط الشعار (الرأس الإنجليزي "WebSeeker") المسجَّل لدى reportlab
+BRAND_FONT_NAME = "Orbitron-Bold"
+BRAND_FONT_PATH = os.path.join(FONTS_DIR, "Orbitron-Bold.ttf")
+LOGO_PATH = os.path.join(FONTS_DIR, "iust_logo.png")
+
 _font_registered = False
+_brand_font_registered = False
 
 
 def _register_fonts():
     """
     يسجّل خطًا يدعم العربية لدى ReportLab. يبحث عن ملفات خطوط TTF داخل
-    مجلد fonts بجانب هذا الملف. إن لم يجد أي خط، يرفع خطأ واضحًا يوجّه
-    المستخدم لوضع ملف خط مناسب هناك (Amiri أو NotoNaskhArabic مثلاً)
-    بدل أن يفشل بصمت أو برسالة غامضة من ReportLab.
+    مجلد fonts بجانب هذا الملف (باستثناء خط الشعار Orbitron الذي له
+    دالة تسجيل مستقلة تمامًا، حتى لا يختلط الاثنان). إن لم يجد أي خط
+    عربي، يرفع خطأ واضحًا يوجّه المستخدم لوضع ملف خط مناسب هناك (Amiri أو
+    NotoNaskhArabic مثلاً) بدل أن يفشل بصمت أو برسالة غامضة من ReportLab.
     """
     global _font_registered
     if _font_registered:
@@ -54,6 +62,8 @@ def _register_fonts():
             lower = fname.lower()
             if not lower.endswith(".ttf"):
                 continue
+            if "orbitron" in lower:
+                continue  # خط الشعار له تسجيل مستقل، ليس جزءًا من نظام الخط العربي
             full = os.path.join(FONTS_DIR, fname)
             if "bold" in lower and bold_path is None:
                 bold_path = full
@@ -73,6 +83,26 @@ def _register_fonts():
     pdfmetrics.registerFont(TTFont(FONT_NAME, regular_path))
     pdfmetrics.registerFont(TTFont(FONT_NAME_BOLD, bold_path))
     _font_registered = True
+
+
+def _register_brand_font():
+    """
+    يسجّل خط Orbitron (المستخدم فقط لاسم WebSeeker في رأس الصفحة) بمسار
+    صريح ومستقل تمامًا عن منطق اختيار الخط العربي. إن لم يوجد الملف، لا
+    يرفع خطأ قاتلاً -- فقط يُعطّل رسم اسم WebSeeker (يبقى الشعار والجدول
+    يعملان بشكل طبيعي تمامًا) ليبقى ملف PDF قابلاً للإنشاء حتى لو نُسي
+    رفع هذا الملف بالخطأ.
+    """
+    global _brand_font_registered
+    if _brand_font_registered:
+        return True
+
+    if not os.path.isfile(BRAND_FONT_PATH):
+        return False
+
+    pdfmetrics.registerFont(TTFont(BRAND_FONT_NAME, BRAND_FONT_PATH))
+    _brand_font_registered = True
+    return True
 
 
 def _ar(text):
@@ -98,10 +128,56 @@ COURSE_NAME_SIZE = 12
 DETAIL_SIZE = 10
 LINE_GAP = 6 * mm
 
+# ---- تصميم رأس الصفحة (الشريط الأزرق + الشعار + اسم WebSeeker) ----
+# الأزرق مأخوذ فعليًا من الدائرة الداخلية لشعار الجامعة لضمان التناسق
+# البصري الكامل بين الشريط والشعار، لا لون عشوائي منفصل عنه.
+HEADER_HEIGHT = 22 * mm
+HEADER_BG_COLOR = "#005078"
+HEADER_ACCENT_COLOR = "#E6BE00"  # خط فاصل رفيع بلون أصفر الشعار
+HEADER_LOGO_SIZE = 15 * mm
+BRAND_NAME_SIZE = 19
+BRAND_TEXT = "WebSeeker"
+
 
 def _new_page(c):
     c.showPage()
-    return PAGE_H - MARGIN
+    _draw_header(c)
+    return PAGE_H - HEADER_HEIGHT - 8 * mm
+
+
+def _draw_header(c):
+    """
+    يرسم شريط الرأس العلوي: خلفية زرقاء بعرض الصفحة الكامل، شعار الجامعة
+    على الجهة اليسرى، واسم "WebSeeker" بخط Orbitron الأبيض إلى يمين
+    الشعار مباشرة، وخط فاصل أصفر رفيع أسفل الشريط. يُستدعى مرة في بداية
+    كل صفحة (الأولى والصفحات اللاحقة عند الحاجة)، لتظهر الهوية البصرية
+    باستمرار حتى لو امتد الجدول لأكثر من صفحة.
+    """
+    c.setFillColor(colors.HexColor(HEADER_BG_COLOR))
+    c.rect(0, PAGE_H - HEADER_HEIGHT, PAGE_W, HEADER_HEIGHT, fill=1, stroke=0)
+
+    logo_x = MARGIN
+    logo_y = PAGE_H - HEADER_HEIGHT + (HEADER_HEIGHT - HEADER_LOGO_SIZE) / 2
+    if os.path.isfile(LOGO_PATH):
+        logo = ImageReader(LOGO_PATH)
+        c.drawImage(
+            logo, logo_x, logo_y,
+            width=HEADER_LOGO_SIZE, height=HEADER_LOGO_SIZE,
+            mask="auto", preserveAspectRatio=True,
+        )
+
+    if _register_brand_font():
+        c.setFillColor(colors.white)
+        c.setFont(BRAND_FONT_NAME, BRAND_NAME_SIZE)
+        text_x = logo_x + HEADER_LOGO_SIZE + 4 * mm
+        text_baseline_y = PAGE_H - HEADER_HEIGHT / 2 - (BRAND_NAME_SIZE * 0.32)
+        c.drawString(text_x, text_baseline_y, BRAND_TEXT)
+
+    c.setStrokeColor(colors.HexColor(HEADER_ACCENT_COLOR))
+    c.setLineWidth(1.5)
+    c.line(0, PAGE_H - HEADER_HEIGHT, PAGE_W, PAGE_H - HEADER_HEIGHT)
+
+    c.setFillColor(colors.black)  # إعادة الحالة الافتراضية لما بعد رسم الرأس
 
 
 def build_schedule_pdf(years_data, selected_list, output_path, student_name=None):
@@ -116,7 +192,8 @@ def build_schedule_pdf(years_data, selected_list, output_path, student_name=None
     _register_fonts()
 
     c = canvas.Canvas(output_path, pagesize=A4)
-    y = PAGE_H - MARGIN
+    _draw_header(c)
+    y = PAGE_H - HEADER_HEIGHT - 8 * mm
 
     # ---- العنوان الرئيسي ----
     c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
