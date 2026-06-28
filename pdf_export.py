@@ -197,7 +197,7 @@ def build_schedule_pdf(years_data, selected_list, output_path, student_name=None
 
     # ---- العنوان الرئيسي ----
     c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
-    c.drawCentredString(PAGE_W / 2, y, _ar("الجدول الدراسي الأسبوعي"))
+    c.drawCentredString(PAGE_W / 2, y, _ar(" جدول اوقات المواد "))
     y -= 10 * mm
 
     c.setStrokeColor(colors.HexColor("#1F3864"))
@@ -288,6 +288,6 @@ def build_schedule_pdf(years_data, selected_list, output_path, student_name=None
     # ---- تذييل الصفحة ----
     c.setFont(FONT_NAME, 8)
     c.setFillColor(colors.HexColor("#888888"))
-    c.drawCentredString(PAGE_W / 2, MARGIN / 2, _ar("تم إنشاء هذا الجدول تلقائيًا بواسطة بوت جدول IUST"))
+    c.drawCentredString(PAGE_W / 2, MARGIN / 2, _ar("webseeker تم إنشاء هذا الجدول من خلال بوت "))
 
     c.save()
