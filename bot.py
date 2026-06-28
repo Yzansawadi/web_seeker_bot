@@ -140,18 +140,20 @@ _bot_start_time = datetime.now(timezone.utc)
 
 
 def track_user(user):
-    """يسجّل المستخدم في عدّاد المستخدمين الفريدين، ويكتب سطرًا في الـ logs
-    عند ظهوره لأول مرة منذ آخر تشغيل، حتى يمكن تتبّع الاستخدام عبر Logs."""
+    """يسجّل المستخدم في عدّاد المستخدمين الفريدين (إحصائية محلية منذ آخر
+    تشغيل لأمر /stats)، ويكتب سطرًا في الـ logs عند ظهوره لأول مرة."""
     is_new = user.id not in seen_users
     seen_users.add(user.id)
     if is_new:
         name = user.full_name or user.username or str(user.id)
-        logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين: %s",
+        logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين منذ آخر تشغيل: %s",
                     name, user.id, len(seen_users))
         # يُنفَّذ في الخلفية حتى لا تنتظر استجابة البوت اكتمال طلبات
-        # الشبكة (Upstash + Telegram) الخاصة بإشعار المالك.
+        # الشبكة (Upstash + Telegram) الخاصة بإشعار المالك. العدّاد الكلي
+        # الدائم لكل المستخدمين يُحسَب داخل notifier.py من Redis نفسه،
+        # لا من seen_users المحلية (التي تُصفَّر مع كل إعادة تشغيل).
         asyncio.create_task(
-            asyncio.to_thread(notifier.register_new_user, user.id, user.username, len(seen_users))
+            asyncio.to_thread(notifier.register_new_user, user.id, user.username)
         )
 
 

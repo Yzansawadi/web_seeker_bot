@@ -27,6 +27,7 @@ notifier.py
 import os
 import json
 import logging
+import threading
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -55,6 +56,28 @@ if not _storage_enabled:
 DAMASCUS_TZ = timezone(timedelta(hours=3))  # توقيت دمشق/بيروت تقريبًا (UTC+3)
 
 MAX_EVENTS_KEPT = 30  # أقصى عدد أحداث محفوظة في سجل النشاط الحالي لكل مستخدم
+
+TOTAL_USERS_COUNTER_KEY = "iust_total_users_counter"
+
+# ---------------------------------------------------------------------------
+# قفل لكل مستخدم: يمنع معالجة حدثين لنفس المستخدم بالتوازي (race condition).
+# bot.py يُطلق كل حدث كمهمة خلفية مستقلة (asyncio.to_thread)، فإذا ضغط
+# المستخدم زرين بسرعة (أو تأخر طلب شبكي عن آخر)، يمكن لمهمتين أن تقرآ نفس
+# السجل القديم من Redis في نفس اللحظة، فتفقد إحدى التعديلات وتُرسَل رسالتان
+# منفصلتان بدل واحدة (وهذا ما تسبب بمشكلة التكرار وتذبذب total_users).
+# القفل هنا يضمن أن أحداث المستخدم نفسه تُعالَج بترتيب تسلسلي صارم.
+# ---------------------------------------------------------------------------
+_user_locks = {}
+_user_locks_guard = threading.Lock()
+
+
+def _get_user_lock(user_id):
+    with _user_locks_guard:
+        lock = _user_locks.get(user_id)
+        if lock is None:
+            lock = threading.Lock()
+            _user_locks[user_id] = lock
+        return lock
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +125,29 @@ def save_user_record(user_id, record):
     _redis_call("SET", _user_key(user_id), json.dumps(record, ensure_ascii=False))
 
 
+def _increment_total_users():
+    """
+    يزيد عدّاد المستخدمين الكلي الدائم على Redis بمقدار 1 ويعيد القيمة
+    الجديدة. يُستخدم INCR لأنه أمر ذرّي (atomic) بطبيعته في Redis، فلا
+    يحدث تضارب حتى لو استدعاه عدة مستخدمين جدد في نفس اللحظة بالضبط --
+    على عكس "قراءة len(seen_users) من الذاكرة" الذي كان يُصفَّر أساسًا مع
+    كل إعادة تشغيل لخدمة Render ويعطي أرقامًا غير متّسقة بين المستخدمين.
+    """
+    result = _redis_call("INCR", TOTAL_USERS_COUNTER_KEY)
+    return result if result is not None else "-"
+
+
+def _get_total_users():
+    """يقرأ العدّاد الكلي الحالي دون زيادته (لعرضه في رسائل لا تخص مستخدمًا جديدًا)."""
+    result = _redis_call("GET", TOTAL_USERS_COUNTER_KEY)
+    if result is None:
+        return "-"
+    try:
+        return int(result)
+    except (TypeError, ValueError):
+        return "-"
+
+
 # ---------------------------------------------------------------------------
 # أدوات تنسيق
 # ---------------------------------------------------------------------------
@@ -122,7 +168,7 @@ def _format_last_active(dt):
 
 def _build_message_text(record):
     lines = [
-        f"total_users : {record.get('total_users_at_join', '-')}",
+        f"total_users : {_get_total_users()}",
         f"telegram_id: {record['telegram_id']}",
         f"username: {record.get('username') or '-'}",
         f"join_date: {record['join_date']}",
@@ -199,22 +245,30 @@ def _push_to_telegram(record):
 # الواجهة العامة المستخدمة من bot.py
 # ---------------------------------------------------------------------------
 
-def register_new_user(user_id, username, total_users_at_join):
-    """يُستدعى أول مرة يظهر فيها مستخدم جديد. ينشئ سجلًا جديدًا له ويرسل
-    أول رسالة خاصة به في شات الإشعارات."""
-    now = _now_damascus()
-    record = {
-        "telegram_id": user_id,
-        "username": username,
-        "join_date": now.strftime("%Y-%m-%d"),
-        "last_active_iso": now.isoformat(),
-        "total_users_at_join": total_users_at_join,
-        "schedules_created": 0,
-        "events": [],
-        "message_id": None,
-    }
-    _push_to_telegram(record)  # يضبط record["message_id"] في الذاكرة
-    save_user_record(user_id, record)  # حفظ نهائي واحد بكل القيم مجتمعة
+def register_new_user(user_id, username, total_users_at_join=None):
+    """
+    يُستدعى أول مرة يظهر فيها مستخدم جديد. ينشئ سجلًا جديدًا له ويرسل
+    أول رسالة خاصة به في شات الإشعارات.
+
+    total_users_at_join: معامل قديم محتفَظ به للتوافق مع استدعاءات
+    سابقة، لكنه غير مُستخدَم فعليًا -- العدّاد الكلي يُحسَب الآن من Redis
+    نفسه عبر _increment_total_users() ليكون دائمًا ومتّسقًا، بدل الاعتماد
+    على عدّاد في الذاكرة يُصفَّر مع كل إعادة تشغيل لخدمة Render.
+    """
+    with _get_user_lock(user_id):
+        now = _now_damascus()
+        record = {
+            "telegram_id": user_id,
+            "username": username,
+            "join_date": now.strftime("%Y-%m-%d"),
+            "last_active_iso": now.isoformat(),
+            "schedules_created": 0,
+            "events": [],
+            "message_id": None,
+        }
+        _increment_total_users()
+        _push_to_telegram(record)  # يضبط record["message_id"] في الذاكرة
+        save_user_record(user_id, record)  # حفظ نهائي واحد بكل القيم مجتمعة
 
 
 def log_event(user_id, username, event_type, value=""):
@@ -226,42 +280,47 @@ def log_event(user_id, username, event_type, value=""):
     حالة خاصة: إذا كان event_type هو "show_schedule"، يُزاد عدّاد الجداول
     المُنشأة، ثم (حسب التعليمات) يُفرَّغ سجل الأحداث الحالي بالكامل بعد
     تسجيل هذا الحدث، استعدادًا لجلسة جديدة.
+
+    محاط بقفل خاص بهذا المستخدم: لأن bot.py يُطلق كل حدث كمهمة خلفية
+    مستقلة، قد تصل أحداث متعددة لنفس المستخدم بالتوازي (ضغطتا زر سريعتان
+    مثلاً)؛ القفل يضمن معالجتها بترتيب تسلسلي، فلا يُفقد أي تعديل ولا
+    تُرسَل رسالتان منفصلتان لحدثين متزامنين.
     """
-    record = load_user_record(user_id)
-    now = _now_damascus()
+    with _get_user_lock(user_id):
+        record = load_user_record(user_id)
+        now = _now_damascus()
 
-    if record is None:
-        record = {
-            "telegram_id": user_id,
-            "username": username,
-            "join_date": now.strftime("%Y-%m-%d"),
-            "last_active_iso": now.isoformat(),
-            "total_users_at_join": "-",
-            "schedules_created": 0,
-            "events": [],
-            "message_id": None,
-        }
+        if record is None:
+            record = {
+                "telegram_id": user_id,
+                "username": username,
+                "join_date": now.strftime("%Y-%m-%d"),
+                "last_active_iso": now.isoformat(),
+                "schedules_created": 0,
+                "events": [],
+                "message_id": None,
+            }
 
-    record["last_active_iso"] = now.isoformat()
-    record["username"] = username or record.get("username")
+        record["last_active_iso"] = now.isoformat()
+        record["username"] = username or record.get("username")
 
-    is_show_schedule = event_type == "show_schedule"
-    if is_show_schedule:
-        record["schedules_created"] = record.get("schedules_created", 0) + 1
+        is_show_schedule = event_type == "show_schedule"
+        if is_show_schedule:
+            record["schedules_created"] = record.get("schedules_created", 0) + 1
 
-    record.setdefault("events", []).append({"type": event_type, "value": value})
-    record["events"] = record["events"][-MAX_EVENTS_KEPT:]
+        record.setdefault("events", []).append({"type": event_type, "value": value})
+        record["events"] = record["events"][-MAX_EVENTS_KEPT:]
 
-    # بعد تسجيل حدث "عرض الجدول" نفسه، نفرّغ سجل الأحداث فورًا (في نفس
-    # السجل قبل الحفظ، لا بعده) ليبدأ نشاط المستخدم القادم من جديد، كما
-    # طُلب تحديدًا. هذا يجمع الإضافة والتصفير في عملية حفظ ودفع واحدة فقط
-    # بدل مرتين متتاليتين (توفير فعلي على عدد أوامر Redis وعدد طلبات
-    # تيليغرام لكل ضغطة "عرض الجدول").
-    if is_show_schedule:
-        record["events"] = []
+        # بعد تسجيل حدث "عرض الجدول" نفسه، نفرّغ سجل الأحداث فورًا (في نفس
+        # السجل قبل الحفظ، لا بعده) ليبدأ نشاط المستخدم القادم من جديد، كما
+        # طُلب تحديدًا. هذا يجمع الإضافة والتصفير في عملية حفظ ودفع واحدة فقط
+        # بدل مرتين متتاليتين (توفير فعلي على عدد أوامر Redis وعدد طلبات
+        # تيليغرام لكل ضغطة "عرض الجدول").
+        if is_show_schedule:
+            record["events"] = []
 
-    _push_to_telegram(record)  # يضبط record["message_id"] الجديد في الذاكرة
-    save_user_record(user_id, record)  # حفظ نهائي واحد بكل القيم مجتمعة
+        _push_to_telegram(record)  # يضبط record["message_id"] الجديد في الذاكرة
+        save_user_record(user_id, record)  # حفظ نهائي واحد بكل القيم مجتمعة
 
 
 def notify_update_result(success: bool, detail: str = "") -> None:
