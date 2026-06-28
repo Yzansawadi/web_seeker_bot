@@ -1,0 +1,33 @@
+الخط المستخدم في مجلد fonts (FreeSerif.ttf و FreeSerifBold.ttf) هو جزء من
+مشروع GNU FreeFont:
+
+    https://www.gnu.org/software/freefont/
+
+الترخيص: GNU General Public License (GPL) مع استثناء خاص بالخطوط (Font
+Exception)، ينص على أن أي وثيقة (مثل ملف PDF) تُضمّن هذا الخط داخلها لا
+تخضع بسبب ذلك لشروط GPL. بعبارة أخرى: يمكنك توزيع ملفات PDF التي ينشئها
+هذا البوت بحرية، دون أي قيود مرتبطة بترخيص الخط نفسه.
+
+إذا رغبت باستخدام خط عربي آخر (مثل Amiri أو Noto Naskh Arabic)، يمكنك وضع
+ملفات .ttf الخاصة به في هذا المجلد بدل هذه الملفات، مع تسمية النسخة
+العريضة بحيث تحتوي كلمة "Bold" في اسمها.
+
+---
+
+الخط المستخدم لاسم "WebSeeker" في رأس ملف PDF (Orbitron-Bold.ttf) هو خط
+Orbitron من Google Fonts:
+
+    https://fonts.google.com/specimen/Orbitron
+
+الترخيص: SIL Open Font License 1.1 (OFL) -- يسمح بالاستخدام والتوزيع
+والتضمين في أي وثيقة (بما فيها تجاريًا) بحرية تامة.
+
+ملاحظة فنية: الملف الأصلي المُنزَّل من Google Fonts كان خطًا متغيرًا
+(Variable Font) بمحور وزن واحد (wght). تم "تثبيته" إلى نسخة TTF عادية
+بوزن Bold (700) باستخدام أداة fontTools (varLib.instancer)، لأن مكتبة
+reportlab المستخدمة في pdf_export.py لا تدعم الخطوط المتغيرة مباشرة.
+
+---
+
+شعار الجامعة (iust_logo.png) مرفوع من المستخدم لاستخدامه في رأس ملف PDF.
+
