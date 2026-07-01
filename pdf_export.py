@@ -180,53 +180,39 @@ def _draw_header(c):
     c.setFillColor(colors.black)  # إعادة الحالة الافتراضية لما بعد رسم الرأس
 
 
-def _wrap_text_to_width(c, text, font_name, font_size, max_width):
+def build_schedule_pdf(years_data, selected_list, output_path, student_name=None):
     """
-    يلف نصًا عربيًا مُجهَّزًا (بعد _ar) إلى عدة أسطر بحيث لا يتجاوز كل سطر
-    max_width فعليًا (بالنقاط)، بالاعتماد على stringWidth الحقيقي للخط
-    المُستخدَم بدل افتراض عدد أحرف ثابت. ملاحظة: النص يجب أن يكون قد مرّ
-    بالفعل عبر arabic_text.prepare (الاتجاه البصري معكوس)، لذا نقسّمه إلى
-    "كلمات" بحسب المسافات كما هي، ونبني الأسطر بنفس الترتيب المُعطى.
-    """
-    words = text.split(" ")
-    lines = []
-    current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
-        if pdfmetrics.stringWidth(candidate, font_name, font_size) <= max_width or not current:
-            current = candidate
-        else:
-            lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines
+    يبني ملف PDF للجدول النهائي.
 
-
-def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
+    years_data: المخرجات من schedule_data.load_courses()
+    selected_list: قائمة (year, code) بترتيب الاختيار
+    output_path: المسار الذي سيُحفظ فيه الملف
+    student_name: اسم اختياري يظهر في رأس الصفحة (غير مستخدم حاليًا من البوت)
     """
-    يرسم جسم الجدول (الأيام + الجلسات) بدءًا من الإحداثي y المُعطى.
-    all_sessions: قائمة (day, start_min, course_name, session_dict).
-    extra_intro_lines: أسطر نصية اختيارية تُرسَم قبل الأيام مباشرة (تُستخدم
-    لصندوق إحصائيات الجودة في ملف الجدول المثالي)، كل عنصر (نص، حجم خط).
-    يُلَفّ كل نص طويل تلقائيًا على عدة أسطر فعلية بحسب عرضه الحقيقي، حتى
-    لا يتداخل بصريًا مع ما يليه (كان هذا خللاً قبل هذا الإصلاح).
+    _register_fonts()
 
-    تُعاد القيمة النهائية لـ y بعد كل الرسم (غير مستخدمة حاليًا لكنها
-    مفيدة لو احتاج مستدعٍ مستقبلي إضافة محتوى بعدها).
-    """
-    if extra_intro_lines:
-        max_text_width = CONTENT_W - 6 * mm
-        for text, size in extra_intro_lines:
-            c.setFont(FONT_NAME, size)
-            c.setFillColor(colors.HexColor("#1F3864"))
-            wrapped = _wrap_text_to_width(c, _ar(text), FONT_NAME, size, max_text_width)
-            line_height = size * 1.5  # بالنقاط (1pt = 1/72 إنش)؛ نطبّق فرقًا كافيًا بين الأسطر
-            for wrapped_line in wrapped:
-                c.drawCentredString(PAGE_W / 2, y, wrapped_line)
-                y -= line_height * 0.3528 * mm / mm  # 1pt -> mm تقريبًا (0.3528mm/pt)، نُبقي القيمة بوحدة reportlab (نقاط أصلاً)
-        c.setFillColor(colors.black)
-        y -= 4 * mm
+    c = canvas.Canvas(output_path, pagesize=A4)
+    _draw_header(c)
+    y = PAGE_H - HEADER_HEIGHT - 8 * mm
+
+    # ---- العنوان الرئيسي ----
+    c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
+    c.drawCentredString(PAGE_W / 2, y, _ar(" جدول اوقات المواد "))
+    y -= 10 * mm
+
+    c.setStrokeColor(colors.HexColor("#1F3864"))
+    c.setLineWidth(1)
+    c.line(LEFT_X, y, RIGHT_X, y)
+    y -= 8 * mm
+
+    # ---- تجميع الجلسات بحسب اليوم ----
+    all_sessions = []
+    for year, code in selected_list:
+        course = sd.get_course(years_data, year, code)
+        if not course:
+            continue
+        for s in course["sessions"]:
+            all_sessions.append((s["day"], s["start_min"], course["name"], s))
 
     by_day = {}
     for day, start_min, name, s in all_sessions:
@@ -237,17 +223,20 @@ def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
     if not ordered_days:
         c.setFont(FONT_NAME, DETAIL_SIZE + 2)
         c.drawCentredString(PAGE_W / 2, y, _ar("لا توجد معلومات جدول للمواد المختارة."))
-        return y
+        c.save()
+        return
 
     day_colors = ["#1F3864", "#2E5395", "#3D6BB3", "#4F81BD", "#6FA8DC", "#9FC5E8", "#C9DAF8"]
 
     for day_idx, day in enumerate(ordered_days):
         sessions_today = sorted(by_day[day], key=lambda x: x[0])
 
+        # تقدير الارتفاع اللازم لرأس اليوم + كل المواد فيه، وفتح صفحة جديدة عند الحاجة
         needed_height = 12 * mm + len(sessions_today) * 16 * mm
         if y - needed_height < MARGIN:
             y = _new_page(c)
 
+        # ---- رأس اليوم ----
         header_color = colors.HexColor(day_colors[day_idx % len(day_colors)])
         c.setFillColor(header_color)
         c.roundRect(LEFT_X, y - 9 * mm, CONTENT_W, 9 * mm, 2 * mm, fill=1, stroke=0)
@@ -267,16 +256,19 @@ def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
             room = s["room"]
             teacher = s["teacher"]
 
+            # خلفية خفيفة لكل مادة لتسهيل القراءة
             c.setFillColor(colors.HexColor("#F2F6FC"))
             c.roundRect(LEFT_X, y - 14 * mm, CONTENT_W, 13 * mm, 1.5 * mm, fill=1, stroke=0)
             c.setFillColor(colors.black)
 
+            # السطر الأول: اسم المادة (يمين) + الوقت (يسار)
             c.setFont(FONT_NAME_BOLD, COURSE_NAME_SIZE)
             c.drawRightString(RIGHT_X - 3 * mm, y - 5.5 * mm, _ar(name))
 
             c.setFont(FONT_NAME, DETAIL_SIZE)
             c.drawString(LEFT_X + 3 * mm, y - 5.5 * mm, time_range)
 
+            # السطر الثاني: النوع + القاعة + المدرّس
             detail_parts = [activity]
             if room:
                 detail_parts.append(f"القاعة: {room}")
@@ -291,84 +283,11 @@ def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
 
             y -= 16 * mm
 
-        y -= 4 * mm
+        y -= 4 * mm  # مسافة بين الأيام
 
-    return y
-
-
-def _draw_footer(c):
+    # ---- تذييل الصفحة ----
     c.setFont(FONT_NAME, 8)
     c.setFillColor(colors.HexColor("#888888"))
-    c.drawCentredString(PAGE_W / 2, MARGIN / 2, _ar("تم إنشاء هذا الجدول تلقائيًا بواسطة بوت جدول IUST"))
+    c.drawCentredString(PAGE_W / 2, MARGIN / 2, _ar("webseeker تم إنشاء هذا الجدول من خلال بوت "))
 
-
-def build_schedule_pdf(years_data, selected_list, output_path, student_name=None):
-    """
-    يبني ملف PDF للجدول النهائي.
-
-    years_data: المخرجات من schedule_data.load_courses()
-    selected_list: قائمة (year, code) بترتيب الاختيار
-    output_path: المسار الذي سيُحفظ فيه الملف
-    student_name: اسم اختياري يظهر في رأس الصفحة (غير مستخدم حاليًا من البوت)
-    """
-    _register_fonts()
-
-    c = canvas.Canvas(output_path, pagesize=A4)
-    _draw_header(c)
-    y = PAGE_H - HEADER_HEIGHT - 8 * mm
-
-    c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
-    c.drawCentredString(PAGE_W / 2, y, _ar("الجدول الدراسي الأسبوعي"))
-    y -= 10 * mm
-
-    c.setStrokeColor(colors.HexColor("#1F3864"))
-    c.setLineWidth(1)
-    c.line(LEFT_X, y, RIGHT_X, y)
-    y -= 8 * mm
-
-    all_sessions = []
-    for year, code in selected_list:
-        course = sd.get_course(years_data, year, code)
-        if not course:
-            continue
-        for s in course["sessions"]:
-            all_sessions.append((s["day"], s["start_min"], course["name"], s))
-
-    _draw_sessions_body(c, y, all_sessions)
-    _draw_footer(c)
-    c.save()
-
-
-def build_optimized_schedule_pdf(chosen_options, output_path, stats_lines=None):
-    """
-    يبني ملف PDF لنتيجة "توليد جدول مثالي" من محرك schedule_optimizer.
-
-    chosen_options: قائمة كائنات SectionOption (شُعبة واحدة محدَّدة بالضبط
-    لكل مادة/نشاط، لا كل شُعب المادة كما في build_schedule_pdf العادية).
-    stats_lines: أسطر نصية اختيارية (مثل "عدد أيام الحضور: 3") تُعرض في
-    صندوق إحصائيات أعلى الجدول لإبراز جودة الحل المختار.
-    """
-    _register_fonts()
-
-    c = canvas.Canvas(output_path, pagesize=A4)
-    _draw_header(c)
-    y = PAGE_H - HEADER_HEIGHT - 8 * mm
-
-    c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
-    c.drawCentredString(PAGE_W / 2, y, _ar("الجدول المثالي المُقترَح"))
-    y -= 10 * mm
-
-    c.setStrokeColor(colors.HexColor("#1F3864"))
-    c.setLineWidth(1)
-    c.line(LEFT_X, y, RIGHT_X, y)
-    y -= 8 * mm
-
-    all_sessions = []
-    for opt in chosen_options:
-        for s in opt.sessions:
-            all_sessions.append((s["day"], s["start_min"], opt.course_name, s))
-
-    intro = [(line, DETAIL_SIZE + 1) for line in stats_lines] if stats_lines else None
-    y = _draw_sessions_body(c, y, all_sessions, extra_intro_lines=intro)
-    _draw_footer(c)
     c.save()

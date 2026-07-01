@@ -62,10 +62,6 @@ def _time_to_minutes(t):
     return h * 60 + mins
 
 
-# اسم عام (بدون شرطة سفلية) للاستخدام من وحدات خارجية مثل schedule_optimizer.py
-time_to_minutes = _time_to_minutes
-
-
 def _split_days(days_field):
     """
     The scraper sometimes stores more than one day in a single cell,
