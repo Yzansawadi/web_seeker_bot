@@ -77,6 +77,7 @@ from telegram.ext import (
 import schedule_data as sd
 import pdf_export
 import notifier
+import schedule_optimizer as opt
 
 # uvicorn/starlette مطلوبتان فقط لوضع Webhook (الاستضافة السحابية). إن لم
 # تكونا مثبَّتتين والبوت يعمل محليًا بوضع Polling فقط، لا مشكلة في ذلك --
@@ -225,10 +226,12 @@ def build_home_keyboard(years_data, has_selection):
     for i in range(0, len(year_buttons), 2):
         rows.append(year_buttons[i:i + 2])
 
-    # زر "عرض الجدول" و"حذف مادة" يظهران فقط إذا كانت هناك مادة مختارة
-    # على الأقل، وبدون أي زر "رجوع" في هذه الشاشة (حسب التصميم المطلوب).
+    # زر "عرض الجدول" و"توليد جدول مثالي" و"حذف مادة" تظهر فقط إذا كانت
+    # هناك مادة مختارة على الأقل، وبدون أي زر "رجوع" في هذه الشاشة (حسب
+    # التصميم المطلوب).
     if has_selection:
         rows.append([InlineKeyboardButton("عرض الجدول", callback_data="show_schedule")])
+        rows.append([InlineKeyboardButton("توليد جدول مثالي", callback_data="optimize_schedule")])
         rows.append([InlineKeyboardButton("حذف مادة", callback_data="delete_menu:home")])
 
     return InlineKeyboardMarkup(rows)
@@ -602,6 +605,154 @@ async def run_update_schedule(query, context):
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
+def build_optimized_text(result):
+    """
+    يبني نص الرسالة النصية لنتيجة "توليد جدول مثالي".
+
+    result: القاموس المُعاد من find_best_schedules.
+    يُعيد نصًا واضحًا يوضح: إحصائيات الجودة (أيام/فجوات)، المواد المُستثناة
+    إن وُجدت مع سبب مفهوم، ثم تفاصيل الجدول يومًا بيوم مرتبة زمنيًا.
+    """
+    if result["timed_out"] and not result["schedules"]:
+        return (
+            "انتهى وقت المعالجة قبل إيجاد جدول مثالي.\n"
+            "جرّب اختيار عدد أقل من المواد للحصول على نتيجة أسرع."
+        )
+
+    if not result["schedules"]:
+        no_data = result.get("no_data_courses", [])
+        if no_data:
+            return (
+                "لا توجد معلومات جدول كافية لإنشاء جدول مثالي.\n"
+                "المواد التالية بدون معلومات أوقات: " + "، ".join(no_data)
+            )
+        return "لم يتمكن النظام من إيجاد أي جدول ممكن للمواد المختارة."
+
+    best = result["schedules"][0]
+    lines = ["الجدول المثالي المقترح\n"]
+
+    lines.append(f"عدد أيام الحضور: {best['days_count']}")
+    if best["total_gap_minutes"] == 0:
+        lines.append("لا توجد فراغات بين المحاضرات في أي يوم")
+    else:
+        lines.append(f"مجموع الفراغات بين المحاضرات: {best['total_gap_minutes']} دقيقة")
+
+    if result["excluded_courses"]:
+        lines.append("")
+        lines.append("مواد مستثناة بسبب تعارض حتمي:")
+        for e in result["excluded_courses"]:
+            lines.append(f"  • {e['name']}")
+        lines.append("(لا توجد أي تركيبة أوقات تسمح بدمجها مع بقية مواداتك)")
+
+    if result.get("no_data_courses"):
+        lines.append("")
+        lines.append("مواد بدون معلومات أوقات (لم تُدرَج في الجدول):")
+        for name in result["no_data_courses"]:
+            lines.append(f"  • {name}")
+
+    # ترتيب الجلسات يومًا بيوم
+    by_day = {}
+    for o in best["options"]:
+        for s in o.sessions:
+            by_day.setdefault(s["day"], []).append((s["start_min"], o.course_name, o.activity, s))
+
+    ordered_days = [d for d in sd.DAY_ORDER if d in by_day]
+    if ordered_days:
+        lines.append("")
+    for day in ordered_days:
+        lines.append(f"\n{day}")
+        for _, name, activity, s in sorted(by_day[day], key=lambda x: x[0]):
+            room = f" | القاعة: {s['room']}" if s.get("room") else ""
+            teacher = f" | {s['teacher']}" if s.get("teacher") else ""
+            lines.append(f"  {s['start']} – {s['end']}  —  {name}")
+            lines.append(f"      {activity}{room}{teacher}")
+
+    return "\n".join(lines)
+
+
+async def optimize_schedule(query, context):
+    """
+    معالج زر "توليد جدول مثالي": يشغّل محرك التحسين في خيط منفصل حتى لا
+    يحجب حلقة أحداث تيليغرام طوال فترة البحث (قد تصل لثوانٍ عدة)، ثم
+    يرسل النتيجة كنص + PDF، ويحتفظ بالاختيارات كما هي (لا يصفّرها) لأن
+    الطالب قد يريد مقارنة النتيجة المثالية بالجدول العادي أو تعديل اختياراته.
+    """
+    user_id = query.from_user.id
+    session = get_session(user_id)
+    years_data = sd.load_courses()
+
+    if not session["selected"]:
+        await query.answer("لا توجد مواد مختارة.", show_alert=True)
+        return
+
+    await query.answer()
+    await query.edit_message_text(
+        "جاري تحليل الجدول المثالي...\n"
+        "قد يستغرق هذا بضع ثوانٍ حسب عدد المواد المختارة."
+    )
+
+    selected_snapshot = list(session["selected"])
+
+    try:
+        result = await asyncio.to_thread(
+            opt.find_best_schedules,
+            years_data,
+            selected_snapshot,
+            sd.get_course,
+            sd.time_to_minutes,
+            top_n=1,
+            time_budget_seconds=8.0,
+        )
+    except Exception:
+        logger.exception("خطأ في محرك التحسين")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="حدث خطأ غير متوقع أثناء توليد الجدول. حاول مجددًا أو اختر مواد مختلفة.",
+        )
+        # أعِد الشاشة الرئيسية كما كانت
+        text, keyboard = home_text_and_keyboard(years_data, session["selected"])
+        await context.bot.send_message(
+            chat_id=query.message.chat_id, text=text, reply_markup=keyboard
+        )
+        return
+
+    result_text = build_optimized_text(result)
+    await context.bot.send_message(chat_id=query.message.chat_id, text=result_text)
+
+    # إرسال PDF فقط إذا يوجد جدول فعلي (لا نرسل PDF لرسائل الخطأ)
+    if result["schedules"]:
+        best = result["schedules"][0]
+        os.makedirs(TEMP_DIR, exist_ok=True)
+        pdf_path = os.path.join(TEMP_DIR, f"optimal_{user_id}.pdf")
+        try:
+            stats = [f"عدد أيام الحضور: {best['days_count']}  |  مجموع الفراغات: {best['total_gap_minutes']} دقيقة"]
+            if result["excluded_courses"]:
+                excl = "، ".join(e["name"] for e in result["excluded_courses"])
+                stats.append(f"مواد مستثناة: {excl}")
+            pdf_export.build_optimized_schedule_pdf(best["options"], pdf_path, stats_lines=stats)
+            with open(pdf_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=f,
+                    filename="optimal_schedule.pdf",
+                    caption="الجدول المثالي بصيغة PDF",
+                )
+        except Exception:
+            logger.exception("فشل إنشاء أو إرسال PDF الجدول المثالي")
+        finally:
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except OSError:
+                    pass
+
+    # أعِد الشاشة الرئيسية مع الاختيارات كما هي (لا نصفّرها)
+    text, keyboard = home_text_and_keyboard(years_data, session["selected"])
+    await context.bot.send_message(
+        chat_id=query.message.chat_id, text=text, reply_markup=keyboard
+    )
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -686,6 +837,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "show_schedule":
         await query.answer()
         await show_schedule(query, context)
+        return
+
+    if data == "optimize_schedule":
+        _fire_log_event("optimize_schedule")
+        await optimize_schedule(query, context)
         return
 
     await query.answer()
