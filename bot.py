@@ -77,6 +77,7 @@ from telegram.ext import (
 import schedule_data as sd
 import pdf_export
 import notifier
+import schedule_optimizer as opt
 
 # uvicorn/starlette مطلوبتان فقط لوضع Webhook (الاستضافة السحابية). إن لم
 # تكونا مثبَّتتين والبوت يعمل محليًا بوضع Polling فقط، لا مشكلة في ذلك --
@@ -158,11 +159,14 @@ def track_user(user):
 
 
 def get_session(user_id):
-    return user_sessions.setdefault(user_id, {"selected": []})
+    s = user_sessions.setdefault(user_id, {"selected": [], "mode": None})
+    if "mode" not in s:   # توافق مع جلسات قديمة قبل إضافة الحقل
+        s["mode"] = None
+    return s
 
 
 def reset_session(user_id):
-    user_sessions[user_id] = {"selected": []}
+    user_sessions[user_id] = {"selected": [], "mode": None}
     return user_sessions[user_id]
 
 
@@ -207,9 +211,12 @@ def selected_courses_block(years_data, selected_list):
 # بناء لوحات الأزرار
 # ---------------------------------------------------------------------------
 
-def build_home_keyboard(years_data, has_selection):
+def build_start_keyboard():
+    """
+    شاشة البداية: تظهر عند /start وبعد كل إرسال نتيجة (تصفير كامل).
+    تحتوي زر التحديث + زرَي المسارين الرئيسيين فقط، بدون سنوات أو اختيارات.
+    """
     rows = []
-
     remaining = cooldown_remaining_seconds()
     if remaining <= 0:
         rows.append([InlineKeyboardButton("تحديث أوقات الجدول", callback_data="update_schedule")])
@@ -217,7 +224,29 @@ def build_home_keyboard(years_data, has_selection):
         rows.append([InlineKeyboardButton(
             f"التحديث متاح بعد {format_remaining(remaining)}", callback_data="update_cooldown"
         )])
+    rows.append([InlineKeyboardButton("توليد أفضل جدول ممكن", callback_data="mode:optimize")])
+    rows.append([InlineKeyboardButton("عرض أوقات المواد فقط", callback_data="mode:show")])
+    return InlineKeyboardMarkup(rows)
 
+
+def build_selection_keyboard(years_data, mode, has_selection):
+    """
+    شاشة الاختيار (السنوات + الأزرار الإضافية) التي تظهر بعد اختيار المسار.
+    تتغيّر محتوياتها حسب mode وحسب وجود اختيار أم لا:
+
+    mode="show"  + لا اختيار: يظهر زر "إرسال أوقات جميع المواد PDF" (يختفي بعد أول اختيار)
+    mode="show"  + يوجد اختيار: "عرض الجدول" + "حذف مادة"
+    mode="optimize" + يوجد اختيار: "توليد الجدول المثالي" + "حذف مادة"
+    """
+    rows = []
+
+    # زر "إرسال أوقات جميع المواد PDF" — يظهر فقط في وضع show ولم يُختَر أي مادة بعد
+    if mode == "show" and not has_selection:
+        rows.append([InlineKeyboardButton(
+            "إرسال أوقات جميع المواد (PDF)", callback_data="send_all_times_pdf"
+        )])
+
+    # قائمة السنوات
     year_buttons = []
     for y in sd.get_years(years_data):
         label = YEAR_NAMES.get(y, f"السنة {y}")
@@ -225,13 +254,22 @@ def build_home_keyboard(years_data, has_selection):
     for i in range(0, len(year_buttons), 2):
         rows.append(year_buttons[i:i + 2])
 
-    # زر "عرض الجدول" و"حذف مادة" يظهران فقط إذا كانت هناك مادة مختارة
-    # على الأقل، وبدون أي زر "رجوع" في هذه الشاشة (حسب التصميم المطلوب).
     if has_selection:
-        rows.append([InlineKeyboardButton("عرض الجدول", callback_data="show_schedule")])
+        if mode == "show":
+            rows.append([InlineKeyboardButton("عرض الجدول", callback_data="show_schedule")])
+        elif mode == "optimize":
+            rows.append([InlineKeyboardButton("توليد الجدول المثالي", callback_data="optimize_schedule")])
         rows.append([InlineKeyboardButton("حذف مادة", callback_data="delete_menu:home")])
 
     return InlineKeyboardMarkup(rows)
+
+
+def build_home_keyboard(years_data, has_selection):
+    """
+    wrapper للتوافق الخلفي مع استدعاءات قديمة — يُوجِّه للشاشة الصحيحة.
+    الكود الجديد يستخدم build_selection_keyboard و build_start_keyboard مباشرةً.
+    """
+    return build_selection_keyboard(years_data, "show", has_selection)
 
 
 def build_delete_keyboard(years_data, selected_list, return_to):
@@ -335,16 +373,38 @@ def build_full_schedule_text(years_data, selected_list):
 # بناء نص ولوحة الشاشة الرئيسية (مشترك بين /start وكل مسارات الرجوع إليها)
 # ---------------------------------------------------------------------------
 
-def home_text_and_keyboard(years_data, selected_list, intro_note=""):
+def start_text_and_keyboard(intro_note=""):
+    """نص ولوحة شاشة البداية (3 أزرار، بدون سنوات)."""
+    text = intro_note or "اختر ما تريد القيام به:"
+    return text, build_start_keyboard()
+
+
+def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
+    """نص ولوحة شاشة الاختيار (السنوات + اختيارات المواد)."""
     has_selection = len(selected_list) > 0
     text = intro_note
     text += selected_courses_block(years_data, selected_list)
 
     if not schedule_file_exists():
-        text += "لم يتم جلب بيانات الجدول حتى الآن. اضغط على زر تحديث أوقات الجدول أولًا، ثم اختر السنة الدراسية."
+        text += "لم يتم جلب بيانات الجدول حتى الآن. ارجع واضغط تحديث أوقات الجدول."
+    else:
+        if mode == "optimize":
+            text += "اختر المواد التي تريد تحسين جدولها."
+        else:
+            text += "اختر المواد التي تريد عرض أوقاتها."
+
+    keyboard = build_selection_keyboard(years_data, mode, has_selection)
+    return text, keyboard
+
+
+def home_text_and_keyboard(years_data, selected_list, intro_note=""):
+    """wrapper للتوافق الخلفي — يستخدمه كود الحذف والرجوع القديم."""
+    has_selection = len(selected_list) > 0
+    text = intro_note + selected_courses_block(years_data, selected_list)
+    if not schedule_file_exists():
+        text += "لم يتم جلب بيانات الجدول حتى الآن."
     else:
         text += "اختر السنة الدراسية للمتابعة."
-
     keyboard = build_home_keyboard(years_data, has_selection)
     return text, keyboard
 
@@ -357,10 +417,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     track_user(update.effective_user)
     reset_session(user_id)
-    years_data = sd.load_courses()
-    text, keyboard = home_text_and_keyboard(
-        years_data, [], intro_note="أهلًا بك في بوت جدول IUST.\n\n"
-    )
+    text, keyboard = start_text_and_keyboard(intro_note="أهلًا بك في بوت جدول IUST.\n\n")
     await update.message.reply_text(text, reply_markup=keyboard)
 
 
@@ -387,9 +444,18 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
-async def go_home(query, context, selected_list, intro_note=""):
+async def go_home(query, context, selected_list, intro_note="", mode=None):
+    """
+    يُعيد المستخدم للشاشة المناسبة:
+    - إن لم يكن mode محدّدًا (None): يعيد شاشة الاختيار بوضع "show" كافتراضي
+      (هذا يحدث عند الرجوع من قائمة مواد السنة، أو في سياقات التوافق الخلفي).
+      شاشة البداية (3 أزرار) لا تُعرض إلا بعد تصفير كامل للجلسة
+      (show_schedule / optimize_schedule / run_update_schedule).
+    - إن كان mode محدّدًا ("show"/"optimize"): يعيد شاشة الاختيار بالوضع الصحيح.
+    """
     years_data = sd.load_courses()
-    text, keyboard = home_text_and_keyboard(years_data, selected_list, intro_note=intro_note)
+    effective_mode = mode if mode is not None else "show"
+    text, keyboard = selection_text_and_keyboard(years_data, effective_mode, selected_list, intro_note=intro_note)
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
@@ -402,7 +468,7 @@ async def show_year_courses(query, context, year):
     has_selection = len(session["selected"]) > 0
 
     year_label = YEAR_NAMES.get(year, f"السنة {year}")
-    text = f"مواد {year_label}\n\nاختر مادة لعرض جدولها:"
+    text = f"مواد {year_label}\n\nاختر مادة:"
     await query.edit_message_text(
         text,
         reply_markup=build_year_courses_keyboard(years_data, year, selected_codes, has_selection),
@@ -422,20 +488,14 @@ async def select_course(query, context, year, code):
     if (year, code) not in session["selected"]:
         session["selected"].append((year, code))
 
-    # بعد اختيار مادة، نعود مباشرة للشاشة الرئيسية (قائمة السنوات) مع تحديث
-    # صندوق "المواد المختارة" وإظهار زر "عرض الجدول".
-    await go_home(query, context, session["selected"])
+    await go_home(query, context, session["selected"], mode=session.get("mode"))
 
 
 async def back_home(query, context):
-    """
-    زر 'رجوع' من شاشة مواد السنة: يعيد الشاشة الرئيسية فقط، دون أي تسجيل
-    جديد من هذه الزيارة، ومع الحفاظ الكامل على كل المواد المختارة سابقًا.
-    التصفير الوحيد المسموح به يحدث بعد "عرض الجدول" أو زر "حذف".
-    """
+    """رجوع حقيقي بدون تصفير: يعيد شاشة الاختيار مع الاختيارات كما هي."""
     user_id = query.from_user.id
     session = get_session(user_id)
-    await go_home(query, context, session["selected"])
+    await go_home(query, context, session["selected"], mode=session.get("mode"))
 
 
 async def show_delete_menu(query, context, return_to):
@@ -471,9 +531,10 @@ async def _return_after_delete(query, context, return_to):
     user_id = query.from_user.id
     session = get_session(user_id)
     years_data = sd.load_courses()
+    mode = session.get("mode")
 
     if return_to == "home":
-        await go_home(query, context, session["selected"])
+        await go_home(query, context, session["selected"], mode=mode)
         return
 
     if return_to.startswith("year-"):
@@ -481,15 +542,14 @@ async def _return_after_delete(query, context, return_to):
         selected_codes = {code for (y, code) in session["selected"] if y == year}
         has_selection = len(session["selected"]) > 0
         year_label = YEAR_NAMES.get(year, f"السنة {year}")
-        text = f"مواد {year_label}\n\nاختر مادة لعرض جدولها:"
+        text = f"مواد {year_label}\n\nاختر مادة:"
         await query.edit_message_text(
             text,
             reply_markup=build_year_courses_keyboard(years_data, year, selected_codes, has_selection),
         )
         return
 
-    # احتياط: قيمة غير متوقعة -> الرجوع للشاشة الرئيسية
-    await go_home(query, context, session["selected"])
+    await go_home(query, context, session["selected"], mode=mode)
 
 
 async def show_schedule(query, context):
@@ -497,9 +557,8 @@ async def show_schedule(query, context):
     session = get_session(user_id)
     years_data = sd.load_courses()
 
-    selected_snapshot = list(session["selected"])  # نسخة قبل التصفير
+    selected_snapshot = list(session["selected"])
     text = build_full_schedule_text(years_data, selected_snapshot)
-
     await query.edit_message_text(text)
 
     if selected_snapshot:
@@ -526,14 +585,11 @@ async def show_schedule(query, context):
                 except OSError:
                     pass
 
-    # بعد عرض الجدول وإرساله، تُصفَّر كل الاختيارات لتبدأ جلسة جديدة من الصفر.
+    # تصفير كامل والعودة لشاشة البداية (3 أزرار)
     reset_session(user_id)
-    years_data = sd.load_courses()
-    home_text, home_keyboard = home_text_and_keyboard(
-        years_data, [], intro_note="تم تصفير اختياراتك، يمكنك البدء من جديد.\n\n"
-    )
+    start_text, start_kb = start_text_and_keyboard()
     await context.bot.send_message(
-        chat_id=query.message.chat_id, text=home_text, reply_markup=home_keyboard
+        chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb
     )
 
 
@@ -587,7 +643,7 @@ async def run_update_schedule(query, context):
     if success:
         note = "تم تحديث الجدول بنجاح بأحدث البيانات من موقع الجامعة.\n\n"
     elif had_data_before:
-        note = "لم يكتمل التحديث بنجاح. سيتم الاستمرار باستخدام البيانات الموجودة من آخر تحديث ناجح.\n\n"
+        note = "لم يكتمل التحديث بنجاح. سيتم الاستمرار باستخدام البيانات من آخر تحديث ناجح.\n\n"
     else:
         note = (
             "فشل التحديث ولا توجد بيانات جدول متاحة حتى الآن.\n"
@@ -598,8 +654,186 @@ async def run_update_schedule(query, context):
             note += f"تفاصيل: {error_snippet}\n"
         note += "\n"
 
-    text, keyboard = home_text_and_keyboard(years_data, session["selected"], intro_note=note)
-    await query.edit_message_text(text, reply_markup=keyboard)
+    # بعد التحديث دائمًا نعود لشاشة البداية (3 أزرار) لا لشاشة الاختيار،
+    # لأن التحديث لا ينتمي لأي مسار (optimize/show) بل هو عملية مستقلة.
+    reset_session(user_id)
+    start_text, start_kb = start_text_and_keyboard(intro_note=note)
+    await query.edit_message_text(start_text, reply_markup=start_kb)
+
+
+def build_optimized_text(result):
+    """
+    يبني نص الرسالة النصية لنتيجة "توليد جدول مثالي".
+
+    result: القاموس المُعاد من find_best_schedules.
+    يُعيد نصًا واضحًا يوضح: إحصائيات الجودة (أيام/فجوات)، المواد المُستثناة
+    إن وُجدت مع سبب مفهوم، ثم تفاصيل الجدول يومًا بيوم مرتبة زمنيًا.
+    """
+    if result["timed_out"] and not result["schedules"]:
+        return (
+            "انتهى وقت المعالجة قبل إيجاد جدول مثالي.\n"
+            "جرّب اختيار عدد أقل من المواد للحصول على نتيجة أسرع."
+        )
+
+    if not result["schedules"]:
+        no_data = result.get("no_data_courses", [])
+        if no_data:
+            return (
+                "لا توجد معلومات جدول كافية لإنشاء جدول مثالي.\n"
+                "المواد التالية بدون معلومات أوقات: " + "، ".join(no_data)
+            )
+        return "لم يتمكن النظام من إيجاد أي جدول ممكن للمواد المختارة."
+
+    best = result["schedules"][0]
+    lines = ["الجدول المثالي المقترح\n"]
+
+    lines.append(f"عدد أيام الحضور: {best['days_count']}")
+    if best["total_gap_minutes"] == 0:
+        lines.append("لا توجد فراغات بين المحاضرات في أي يوم")
+    else:
+        lines.append(f"مجموع الفراغات بين المحاضرات: {best['total_gap_minutes']} دقيقة")
+
+    if result["excluded_courses"]:
+        lines.append("")
+        lines.append("مواد مستثناة بسبب تعارض حتمي:")
+        for e in result["excluded_courses"]:
+            lines.append(f"  • {e['name']}")
+        lines.append("(لا توجد أي تركيبة أوقات تسمح بدمجها مع بقية مواداتك)")
+
+    if result.get("no_data_courses"):
+        lines.append("")
+        lines.append("مواد بدون معلومات أوقات (لم تُدرَج في الجدول):")
+        for name in result["no_data_courses"]:
+            lines.append(f"  • {name}")
+
+    # ترتيب الجلسات يومًا بيوم
+    by_day = {}
+    for o in best["options"]:
+        for s in o.sessions:
+            by_day.setdefault(s["day"], []).append((s["start_min"], o.course_name, o.activity, s))
+
+    ordered_days = [d for d in sd.DAY_ORDER if d in by_day]
+    if ordered_days:
+        lines.append("")
+    for day in ordered_days:
+        lines.append(f"\n{day}")
+        for _, name, activity, s in sorted(by_day[day], key=lambda x: x[0]):
+            room = f" | القاعة: {s['room']}" if s.get("room") else ""
+            teacher = f" | {s['teacher']}" if s.get("teacher") else ""
+            lines.append(f"  {s['start']} – {s['end']}  —  {name}")
+            lines.append(f"      {activity}{room}{teacher}")
+
+    return "\n".join(lines)
+
+
+async def send_all_times_pdf(query, context):
+    """يبني ويرسل PDF بأوقات جميع المواد من كل السنوات."""
+    await query.answer()
+    await query.edit_message_text("جاري تجميع أوقات جميع المواد في ملف PDF...\nقد يستغرق هذا لحظة.")
+
+    years_data = sd.load_courses()
+    user_id = query.from_user.id
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    pdf_path = os.path.join(TEMP_DIR, f"all_times_{user_id}.pdf")
+
+    try:
+        await asyncio.to_thread(pdf_export.build_all_times_pdf, years_data, pdf_path)
+        with open(pdf_path, "rb") as f:
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=f,
+                filename="all_course_times.pdf",
+                caption="أوقات جميع المواد الدراسية",
+            )
+    except Exception:
+        logger.exception("فشل إنشاء أو إرسال PDF جميع الأوقات")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="تعذّر إنشاء الملف. تأكد من أن بيانات الجدول محدّثة (اضغط تحديث أوقات الجدول).",
+        )
+    finally:
+        if os.path.exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+            except OSError:
+                pass
+
+    # نعود لشاشة الاختيار مع الحفاظ على mode (لا نصفّر)
+    session = get_session(user_id)
+    text, keyboard = selection_text_and_keyboard(years_data, session.get("mode", "show"), session["selected"])
+    await context.bot.send_message(
+        chat_id=query.message.chat_id, text=text, reply_markup=keyboard
+    )
+
+
+async def optimize_schedule(query, context):
+    user_id = query.from_user.id
+    session = get_session(user_id)
+    years_data = sd.load_courses()
+
+    if not session["selected"]:
+        await query.answer("لا توجد مواد مختارة.", show_alert=True)
+        return
+
+    await query.answer()
+    await query.edit_message_text(
+        "جاري تحليل الجدول المثالي...\n"
+        "قد يستغرق هذا بضع ثوانٍ حسب عدد المواد المختارة."
+    )
+
+    selected_snapshot = list(session["selected"])
+
+    try:
+        result = await asyncio.to_thread(
+            opt.find_best_schedules,
+            years_data, selected_snapshot,
+            sd.get_course, sd.time_to_minutes,
+            top_n=1, time_budget_seconds=8.0,
+        )
+    except Exception:
+        logger.exception("خطأ في محرك التحسين")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="حدث خطأ غير متوقع أثناء توليد الجدول. حاول مجددًا أو اختر مواد مختلفة.",
+        )
+        reset_session(user_id)
+        start_text, start_kb = start_text_and_keyboard()
+        await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
+        return
+
+    result_text = build_optimized_text(result)
+    await context.bot.send_message(chat_id=query.message.chat_id, text=result_text)
+
+    if result["schedules"]:
+        best = result["schedules"][0]
+        os.makedirs(TEMP_DIR, exist_ok=True)
+        pdf_path = os.path.join(TEMP_DIR, f"optimal_{user_id}.pdf")
+        try:
+            stats = [f"عدد أيام الحضور: {best['days_count']}  |  مجموع الفراغات: {best['total_gap_minutes']} دقيقة"]
+            if result["excluded_courses"]:
+                excl = "، ".join(e["name"] for e in result["excluded_courses"])
+                stats.append(f"مواد مستثناة: {excl}")
+            pdf_export.build_optimized_schedule_pdf(best["options"], pdf_path, stats_lines=stats)
+            with open(pdf_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=f,
+                    filename="optimal_schedule.pdf",
+                    caption="الجدول المثالي بصيغة PDF",
+                )
+        except Exception:
+            logger.exception("فشل إنشاء أو إرسال PDF الجدول المثالي")
+        finally:
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except OSError:
+                    pass
+
+    # تصفير كامل والعودة لشاشة البداية
+    reset_session(user_id)
+    start_text, start_kb = start_text_and_keyboard()
+    await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -648,6 +882,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await run_update_schedule(query, context)
         return
 
+    if data.startswith("mode:"):
+        # اختيار المسار (توليد أفضل جدول أو عرض الأوقات) من شاشة البداية
+        await query.answer()
+        chosen_mode = data.split(":", 1)[1]  # "optimize" أو "show"
+        session = get_session(user_id)
+        session["mode"] = chosen_mode
+        years_data = sd.load_courses()
+        text, keyboard = selection_text_and_keyboard(years_data, chosen_mode, session["selected"])
+        await query.edit_message_text(text, reply_markup=keyboard)
+        return
+
+    if data == "send_all_times_pdf":
+        await send_all_times_pdf(query, context)
+        return
+
     if data == "back_home":
         await query.answer()
         await back_home(query, context)
@@ -686,6 +935,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "show_schedule":
         await query.answer()
         await show_schedule(query, context)
+        return
+
+    if data == "optimize_schedule":
+        _fire_log_event("optimize_schedule")
+        await optimize_schedule(query, context)
         return
 
     await query.answer()
