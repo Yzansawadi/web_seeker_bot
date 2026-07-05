@@ -236,7 +236,7 @@ def build_selection_keyboard(years_data, mode, has_selection):
 
     mode="show"  + لا اختيار: يظهر زر "إرسال أوقات جميع المواد PDF" (يختفي بعد أول اختيار)
     mode="show"  + يوجد اختيار: "عرض الجدول" + "حذف مادة"
-    mode="optimize" + يوجد اختيار: "توليد الجدول المثالي" + "حذف مادة"
+    mode="optimize" + يوجد اختيار: "توليد الجدول" + "حذف مادة"
     """
     rows = []
 
@@ -389,7 +389,7 @@ def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
         text += "لم يتم جلب بيانات الجدول حتى الآن. ارجع واضغط تحديث أوقات الجدول."
     else:
         if mode == "optimize":
-            text += "اختر المواد التي تريد تحسين جدولها."
+            text += "اختر المواد التي تريد توليد جدول منها"
         else:
             text += "اختر المواد التي تريد عرض أوقاتها."
 
@@ -417,7 +417,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     track_user(update.effective_user)
     reset_session(user_id)
-    text, keyboard = start_text_and_keyboard(intro_note="أهلًا بك في بوت جدول IUST.\n\n")
+    text, keyboard = start_text_and_keyboard(intro_note=" اهلا بك في بوت websseker. \n\n")
     await update.message.reply_text(text, reply_markup=keyboard)
 
 
@@ -570,7 +570,7 @@ async def show_schedule(query, context):
                 await context.bot.send_document(
                     chat_id=query.message.chat_id,
                     document=f,
-                    filename="schedule.pdf",
+                    filename="times_schedule.pdf",
                 )
         except Exception:
             logger.exception("فشل إنشاء أو إرسال ملف PDF للجدول")
@@ -663,7 +663,7 @@ async def run_update_schedule(query, context):
 
 def build_optimized_text(result):
     """
-    يبني نص الرسالة النصية لنتيجة "توليد جدول مثالي".
+    يبني نص الرسالة النصية لنتيجة " توليد جدول مواد تلقائي"
 
     result: القاموس المُعاد من find_best_schedules.
     يُعيد نصًا واضحًا يوضح: إحصائيات الجودة (أيام/فجوات)، المواد المُستثناة
@@ -818,7 +818,7 @@ async def optimize_schedule(query, context):
                 await context.bot.send_document(
                     chat_id=query.message.chat_id,
                     document=f,
-                    filename="optimal_schedule.pdf",
+                    filename="webseeker_schedule.pdf",
                     caption="الجدول المثالي بصيغة PDF",
                 )
         except Exception:
