@@ -449,7 +449,7 @@ def build_all_times_pdf(years_data, output_path):
                 for s in sessions:
                     day_ar = _ar(s["day"])
                     time_range = f"{s['start']} - {s['end']}"
-                    formatted_sessions.append(f"{day_ar} {time_range}")
+                    formatted_sessions.append(f"{time_range}  {day_ar}")
 
                 days_str = "  |  ".join(formatted_sessions)
 
