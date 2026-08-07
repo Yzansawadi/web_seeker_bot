@@ -461,7 +461,7 @@ def build_all_times_pdf(years_data, output_path):
                 c.drawRightString(RIGHT_X - 5 * mm, y - 4 * mm, _ar(detail))
                 c.setFillColor(colors.HexColor("#555555"))
                 c.setFont(FONT_NAME, DETAIL_SIZE - 2)
-                c.drawString(LEFT_X + 5 * mm, y - 4 * mm, days_str)
+                c.drawString(LEFT_X + 5 * mm, y - 4 * mm, _ar(days_str))
                 c.setFillColor(colors.black)
                 y -= 7 * mm
 
