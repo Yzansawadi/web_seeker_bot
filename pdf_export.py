@@ -444,9 +444,15 @@ def build_all_times_pdf(years_data, output_path):
                 if y - 8 * mm < MARGIN:
                     y = _new_page(c)
 
-                days_str = " | ".join(
-                    f"{s['day']} {s['start']}-{s['end']}" for s in sessions
-                )
+                # تشكيل اسم اليوم فقط بشكل منفصل لمنع الخلل في ترتيب الأرقام والـ AM/PM
+                formatted_sessions = []
+                for s in sessions:
+                    day_ar = _ar(s["day"])
+                    time_range = f"{s['start']} - {s['end']}"
+                    formatted_sessions.append(f"{day_ar} {time_range}")
+
+                days_str = "  |  ".join(formatted_sessions)
+
                 room = sessions[0].get("room", "")
                 teacher = sessions[0].get("teacher", "")
 
@@ -461,7 +467,7 @@ def build_all_times_pdf(years_data, output_path):
                 c.drawRightString(RIGHT_X - 5 * mm, y - 4 * mm, _ar(detail))
                 c.setFillColor(colors.HexColor("#555555"))
                 c.setFont(FONT_NAME, DETAIL_SIZE - 2)
-                c.drawString(LEFT_X + 5 * mm, y - 4 * mm, _ar(days_str))
+                c.drawString(LEFT_X + 5 * mm, y - 4 * mm, days_str)
                 c.setFillColor(colors.black)
                 y -= 7 * mm
 
