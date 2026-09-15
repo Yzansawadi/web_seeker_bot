@@ -5,46 +5,43 @@ bot.py
 ------
 بوت تيليغرام لجدول مواد جامعة IUST.
 
-هيكلة التنقل (بحسب تصميم المستخدم):
+نظام التنقّل (مُعاد بناؤه بالكامل):
+------------------------------------
+بدل تمرير "إلى أين نعود" يدويًا كنص خاص بكل زر (كما كان سابقًا)، يحمل كل
+مستخدم الآن "مكدّس شاشات" (session["stack"]): في كل مرة يدخل المستخدم
+شاشة أعمق (سنة، قائمة حذف...)، تُحفَظ الشاشة التي كان فيها في أعلى
+المكدّس. زر "رجوع" يسحب دائمًا آخر عنصر من المكدّس ويعرضه من جديد --
+هذا يعمل بشكل صحيح ومنطقي بغض النظر عن المسار الذي سلكه المستخدم للوصول
+إلى هنا (بدل كتابة حالة خاصة لكل تركيبة ممكنة من الشاشات).
 
-1) الشاشة الرئيسية (تظهر عند /start، وبعد كل اختيار مادة ناجح):
-   - زر "تحديث أوقات الجدول".
-   - قائمة السنوات (1 إلى 5).
-   - إذا كانت هناك مواد محفوظة من قبل: تظهر في صندوق مرقّم فوق السنوات،
-     ويظهر زر "عرض الجدول" وزر "حذف مادة" تحت قائمة السنوات.
-   - إذا لم تكن هناك أي مادة محفوظة بعد: لا يظهر أي زر إضافي تحت السنوات.
+بالإضافة لزر "رجوع" (خطوة واحدة للخلف)، يوجد الآن في كل شاشة (عدا
+الرئيسية) زر "القائمة الرئيسية" يعيد المستخدم فورًا لشاشة البداية
+بضغطة واحدة، دون أن يفقد أي مادة اختارها (لا يُصفَّر شيء عند الضغط
+عليه -- التصفير يحدث فقط في مكانيه الأصليين: عرض الجدول، وتوليد الجدول
+المثالي، تمامًا كما كان مصمّمًا سابقًا).
 
-2) شاشة مواد سنة معيّنة (بعد اختيار سنة من الشاشة الرئيسية):
-   - قائمة مواد تلك السنة، مع علامة (✓) أمام أي مادة سبق اختيارها منها.
-   - تحتها زر "رجوع"، وإن وُجد اختيار سابق يظهر زر "حذف مادة" أيضًا.
-   - "رجوع" هنا رجوع حقيقي فقط: يعيد الشاشة الرئيسية دون أي تسجيل جديد من
-     هذه الزيارة، **مع الحفاظ الكامل على كل ما تم اختياره سابقًا** (لا
-     تصفير هنا أبدًا).
-   - اختيار مادة هنا يسجّلها، ثم يعيد عرض الشاشة الرئيسية (حالة 1) محدّثة.
-
-3) "حذف مادة" (متاح في الشاشة الرئيسية وشاشة مواد السنة معًا، بعد أول
-   اختيار): يعرض قائمة بكل المواد المختارة حاليًا، والضغط على أي منها
-   يحذفها فورًا، ثم يعيد المستخدم إلى الشاشة التي جاء منها (الرئيسية أو
-   شاشة مواد سنة معيّنة) بنفس حالتها.
-
-4) "عرض الجدول":
-   - يرسل رسالة نصية بالجدول مقسّمًا حسب الأيام، ثم ملف PDF.
-   - بعد الإرسال مباشرة، يصفّر كل الاختيارات المحفوظة لتبدأ جلسة جديدة.
-   - هذا هو **المكان الوحيد** الذي تُصفَّر فيه الاختيارات تلقائيًا.
+هيكلة الشاشات:
+1) الشاشة الرئيسية (start): تظهر عند /start. 3 أزرار: تحديث الجدول،
+   توليد أفضل جدول، عرض أوقات المواد فقط. هذه هي "جذر" التنقّل.
+2) شاشة الاختيار (selection): تظهر بعد اختيار أحد المسارين. تحتوي قائمة
+   السنوات، وصندوق المواد المختارة، وزر إنهاء المسار (عرض/توليد الجدول)
+   وزر حذف مادة إن وُجد اختيار، وزري رجوع/القائمة الرئيسية.
+3) شاشة مواد سنة (year): قائمة مواد سنة معيّنة مع علامة ✓ لما سبق
+   اختياره، وأزرار رجوع/القائمة الرئيسية/حذف مادة.
+4) شاشة حذف مادة (delete): قائمة بكل المواد المختارة حاليًا، الضغط على
+   أي منها يحذفها فورًا ويعيد المستخدم لنفس الشاشة التي جاء منها (تمامًا
+   كما لو ضغط "رجوع").
 
 ملاحظة أداء: تُحمَّل بيانات subjects.xlsx و IUST_schedule_full.xlsx مرة
 واحدة وتُخزَّن في الذاكرة (انظر schedule_data.load_courses)، ولا تُعاد
-قراءتها من القرص إلا إذا تغيّر أحد الملفين فعليًا. هذا يجعل استجابة
-البوت أسرع بشكل كبير مقارنة بإعادة قراءة وتحليل الملفين في كل ضغطة زر.
+قراءتها من القرص إلا إذا تغيّر أحد الملفين فعليًا.
 
-التشغيل محليًا (Polling) -- يبقى جهازك يعمل طوال الوقت:
+التشغيل محليًا (Polling):
     pip install -r requirements.txt
     python3 bot.py
 
-التشغيل على استضافة سحابية (Webhook) -- لا يحتاج جهازك مفتوحًا:
-    يُفعَّل تلقائيًا إذا كان متغيّر البيئة RENDER_EXTERNAL_URL موجودًا
-    (تضبطه استضافات مثل Render تلقائيًا)، أو إذا ضبطت WEBHOOK_URL يدويًا.
-    راجع ملف DEPLOY_AR.md للشرح الكامل خطوة بخطوة لرفع البوت على Render.
+التشغيل على استضافة سحابية (Webhook):
+    راجع ملف DEPLOY_AR.md.
 """
 
 import os
@@ -55,9 +52,6 @@ import sys
 import asyncio
 from datetime import datetime, timezone
 
-# على ويندوز، الترميز الافتراضي لنافذة الأوامر (مثل cp1252) لا يدعم الحروف
-# العربية، وهذا يتسبب بانهيار أي print()/logging يحتوي عليها. نفرض هنا
-# ترميز UTF-8 على مخرجات البرنامج قبل أي شيء آخر لتفادي هذه المشكلة كليًا.
 for _stream_name in ("stdout", "stderr"):
     _stream = getattr(sys, _stream_name)
     if hasattr(_stream, "reconfigure"):
@@ -79,9 +73,6 @@ import pdf_export
 import notifier
 import schedule_optimizer as opt
 
-# uvicorn/starlette مطلوبتان فقط لوضع Webhook (الاستضافة السحابية). إن لم
-# تكونا مثبَّتتين والبوت يعمل محليًا بوضع Polling فقط، لا مشكلة في ذلك --
-# الاستيراد يتم بأمان هنا، والاستخدام الفعلي مؤجَّل لوقت تفعيل وضع Webhook.
 try:
     import uvicorn
     from starlette.applications import Starlette
@@ -109,12 +100,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXTRACT_SCRIPT_PATH = os.path.join(BASE_DIR, "extract_schedule.py")
 TEMP_DIR = os.path.join(BASE_DIR, "temp_pdfs")
 
-# زر "تحديث أوقات الجدول" متاح للجميع، لكن مرة واحدة فقط كل هذه المدة
-# (مشتركة بين كل مستخدمي البوت دفعة واحدة).
 UPDATE_COOLDOWN_SECONDS = 2 * 60 * 60  # ساعتان
 _last_update_ts = {"value": 0.0}
 
-# أقصى مدة انتظار لتشغيل extract_schedule.py قبل اعتباره متعطلًا
 EXTRACT_SCRIPT_TIMEOUT_SECONDS = 180
 
 YEAR_NAMES = {
@@ -129,45 +117,102 @@ YEAR_NAMES = {
 # حالة كل مستخدم (في الذاكرة فقط، تُفقد عند إعادة تشغيل البوت)
 # ---------------------------------------------------------------------------
 # user_id -> {
-#     "selected": [ (year, code), ... ]      # المواد المختارة بترتيب اختيارها
+#     "selected": [ (year, code), ... ],   # المواد المختارة بترتيب اختيارها
+#     "mode": "show" | "optimize" | None,
+#     "stack": [ screen_descriptor, ... ], # مكدّس شاشات التنقّل (انظر أعلى الملف)
 # }
 user_sessions = {}
 
-# مجموعة بسيطة لتتبّع كل مستخدم فريد تفاعل مع البوت منذ آخر إعادة تشغيل.
-# هذا يُصفَّر عند إعادة تشغيل الخدمة (لأن الذاكرة تُصفَّر)، فهو عدّاد "منذ
-# آخر تشغيل" لا عدّاد دائم. استخدم أمر /stats لرؤية العدد الحالي.
 seen_users = set()
 _bot_start_time = datetime.now(timezone.utc)
 
 
 def track_user(user):
-    """يسجّل المستخدم في عدّاد المستخدمين الفريدين (إحصائية محلية منذ آخر
-    تشغيل لأمر /stats)، ويكتب سطرًا في الـ logs عند ظهوره لأول مرة."""
     is_new = user.id not in seen_users
     seen_users.add(user.id)
     if is_new:
         name = user.full_name or user.username or str(user.id)
         logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين منذ آخر تشغيل: %s",
                     name, user.id, len(seen_users))
-        # يُنفَّذ في الخلفية حتى لا تنتظر استجابة البوت اكتمال طلبات
-        # الشبكة (Upstash + Telegram) الخاصة بإشعار المالك. العدّاد الكلي
-        # الدائم لكل المستخدمين يُحسَب داخل notifier.py من Redis نفسه،
-        # لا من seen_users المحلية (التي تُصفَّر مع كل إعادة تشغيل).
         asyncio.create_task(
             asyncio.to_thread(notifier.register_new_user, user.id, user.username)
         )
 
 
 def get_session(user_id):
-    s = user_sessions.setdefault(user_id, {"selected": [], "mode": None})
-    if "mode" not in s:   # توافق مع جلسات قديمة قبل إضافة الحقل
-        s["mode"] = None
+    s = user_sessions.setdefault(user_id, {"selected": [], "mode": None, "stack": []})
+    s.setdefault("mode", None)
+    s.setdefault("stack", [])
     return s
 
 
 def reset_session(user_id):
-    user_sessions[user_id] = {"selected": [], "mode": None}
+    user_sessions[user_id] = {"selected": [], "mode": None, "stack": []}
     return user_sessions[user_id]
+
+
+# ---------------------------------------------------------------------------
+# مكدّس التنقّل: كل شاشة تُمثَّل بـ tuple بسيط (نوع الشاشة, معطياتها إن وُجدت)
+# ---------------------------------------------------------------------------
+
+SCREEN_START = ("start",)
+
+
+def screen_selection(mode):
+    return ("selection", mode)
+
+
+def screen_year(year):
+    return ("year", year)
+
+
+def push_screen(session, descriptor):
+    session.setdefault("stack", []).append(descriptor)
+
+
+def pop_screen(session):
+    stack = session.setdefault("stack", [])
+    if stack:
+        return stack.pop()
+    return SCREEN_START
+
+
+async def render_screen(query, context, user_id, descriptor):
+    """يرسم أي شاشة بناءً على وصفها (تُستخدم عند الرجوع أو القفز للرئيسية)."""
+    session = get_session(user_id)
+    kind = descriptor[0]
+
+    if kind == "selection":
+        years_data = sd.load_courses()
+        mode = descriptor[1]
+        session["mode"] = mode
+        text, keyboard = selection_text_and_keyboard(years_data, mode, session["selected"])
+        await query.edit_message_text(text, reply_markup=keyboard)
+        return
+
+    if kind == "year":
+        await show_year_courses(query, context, descriptor[1])
+        return
+
+    # الافتراضي: الشاشة الرئيسية
+    text, keyboard = start_text_and_keyboard()
+    await query.edit_message_text(text, reply_markup=keyboard)
+
+
+async def go_back(query, context, user_id):
+    """يسحب آخر شاشة من المكدّس ويعرضها -- هذا هو منطق زر 'رجوع' الموحّد."""
+    session = get_session(user_id)
+    descriptor = pop_screen(session)
+    await render_screen(query, context, user_id, descriptor)
+
+
+async def go_start(query, context, user_id):
+    """يصفّر مكدّس التنقّل ويعيد المستخدم للشاشة الرئيسية مباشرة، دون أي
+    تأثير على المواد المختارة (زر 'القائمة الرئيسية')."""
+    session = get_session(user_id)
+    session["stack"] = []
+    text, keyboard = start_text_and_keyboard()
+    await query.edit_message_text(text, reply_markup=keyboard)
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +238,6 @@ def format_remaining(seconds):
 
 
 def selected_courses_block(years_data, selected_list):
-    """
-    يبني نص صندوق "المواد المختارة" المرقّم الذي يظهر فوق قائمة السنوات
-    في الشاشة الرئيسية. يعيد نصًا فارغًا إن لم تكن هناك أي مادة مختارة.
-    """
     if not selected_list:
         return ""
     lines = ["المواد المختارة حتى الآن:"]
@@ -211,11 +252,17 @@ def selected_courses_block(years_data, selected_list):
 # بناء لوحات الأزرار
 # ---------------------------------------------------------------------------
 
+def nav_row():
+    """صف أزرار التنقّل الموحَّد: رجوع خطوة واحدة + قفز للرئيسية مباشرة.
+    يظهر في كل شاشة عدا الشاشة الرئيسية نفسها."""
+    return [
+        InlineKeyboardButton("رجوع", callback_data="back"),
+        InlineKeyboardButton("القائمة الرئيسية", callback_data="go_start"),
+    ]
+
+
 def build_start_keyboard():
-    """
-    شاشة البداية: تظهر عند /start وبعد كل إرسال نتيجة (تصفير كامل).
-    تحتوي زر التحديث + زرَي المسارين الرئيسيين فقط، بدون سنوات أو اختيارات.
-    """
+    """شاشة البداية (جذر التنقّل): زر التحديث + زرَي المسارين، بلا زر رجوع."""
     rows = []
     remaining = cooldown_remaining_seconds()
     if remaining <= 0:
@@ -231,22 +278,19 @@ def build_start_keyboard():
 
 def build_selection_keyboard(years_data, mode, has_selection):
     """
-    شاشة الاختيار (السنوات + الأزرار الإضافية) التي تظهر بعد اختيار المسار.
-    تتغيّر محتوياتها حسب mode وحسب وجود اختيار أم لا:
+    شاشة الاختيار (السنوات + الأزرار الإضافية).
 
-    mode="show"  + لا اختيار: يظهر زر "إرسال أوقات جميع المواد PDF" (يختفي بعد أول اختيار)
+    mode="show"  + لا اختيار: يظهر زر "إرسال أوقات جميع المواد PDF"
     mode="show"  + يوجد اختيار: "عرض الجدول" + "حذف مادة"
     mode="optimize" + يوجد اختيار: "توليد الجدول" + "حذف مادة"
     """
     rows = []
 
-    # زر "إرسال أوقات جميع المواد PDF" — يظهر فقط في وضع show ولم يُختَر أي مادة بعد
     if mode == "show" and not has_selection:
         rows.append([InlineKeyboardButton(
             "إرسال أوقات جميع المواد (PDF)", callback_data="send_all_times_pdf"
         )])
 
-    # قائمة السنوات
     year_buttons = []
     for y in sd.get_years(years_data):
         label = YEAR_NAMES.get(y, f"السنة {y}")
@@ -261,30 +305,18 @@ def build_selection_keyboard(years_data, mode, has_selection):
             rows.append([InlineKeyboardButton("توليد الجدول المثالي", callback_data="optimize_schedule")])
         rows.append([InlineKeyboardButton("حذف مادة", callback_data="delete_menu:home")])
 
+    rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
 
-def build_home_keyboard(years_data, has_selection):
-    """
-    wrapper للتوافق الخلفي مع استدعاءات قديمة — يُوجِّه للشاشة الصحيحة.
-    الكود الجديد يستخدم build_selection_keyboard و build_start_keyboard مباشرةً.
-    """
-    return build_selection_keyboard(years_data, "show", has_selection)
-
-
-def build_delete_keyboard(years_data, selected_list, return_to):
-    """
-    return_to: نص آمن لا يحتوي ':' -- يكون "home" أو "year-<رقم السنة>".
-    يحدد إلى أين نعود بعد الحذف أو عند الضغط على "تراجع"، حتى تبقى تجربة
-    المستخدم متّسقة مع الشاشة التي جاء منها.
-    """
+def build_delete_keyboard(years_data, selected_list):
     rows = []
     for year, code in selected_list:
         course = sd.get_course(years_data, year, code)
         name = course["name"] if course else code
-        rows.append([InlineKeyboardButton(name, callback_data=f"delete_course:{year}:{code}:{return_to}")])
+        rows.append([InlineKeyboardButton(name, callback_data=f"delete_course:{year}:{code}")])
 
-    rows.append([InlineKeyboardButton("تراجع", callback_data=f"cancel_delete:{return_to}")])
+    rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
 
@@ -296,13 +328,10 @@ def build_year_courses_keyboard(years_data, year, selected_codes, has_selection)
         label = f"{mark}{c['name']}"
         rows.append([InlineKeyboardButton(label, callback_data=f"course:{year}:{c['code']}")])
 
-    # "رجوع" هنا رجوع حقيقي فقط: يعيد الشاشة الرئيسية دون أي اختيار جديد
-    # من هذه الزيارة، لكن مع الحفاظ الكامل على كل ما تم اختياره سابقًا.
-    rows.append([InlineKeyboardButton("رجوع", callback_data="back_home")])
-
     if has_selection:
         rows.append([InlineKeyboardButton("حذف مادة", callback_data=f"delete_menu:year-{year}")])
 
+    rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
 
@@ -311,7 +340,6 @@ def build_year_courses_keyboard(years_data, year, selected_codes, has_selection)
 # ---------------------------------------------------------------------------
 
 def format_course_info(course):
-    """نص معلومات المادة: الاسم، ثم كل جلسة (اليوم، النوع، الوقت)."""
     lines = [f"{course['name']}", f"الرمز: {course['code']}", ""]
 
     if not course["sessions"]:
@@ -330,14 +358,10 @@ def format_course_info(course):
 
 
 def build_full_schedule_text(years_data, selected_list):
-    """
-    selected_list: قائمة (year, code) بترتيب الاختيار.
-    يبني نص الجدول النهائي مقسّمًا حسب الأيام ومرتبًا زمنيًا داخل كل يوم.
-    """
     if not selected_list:
         return "لم تقم باختيار أي مادة حتى الآن."
 
-    all_sessions = []  # (day, start_min, course_name, session)
+    all_sessions = []
     for year, code in selected_list:
         course = sd.get_course(years_data, year, code)
         if not course:
@@ -370,23 +394,21 @@ def build_full_schedule_text(years_data, selected_list):
 
 
 # ---------------------------------------------------------------------------
-# بناء نص ولوحة الشاشة الرئيسية (مشترك بين /start وكل مسارات الرجوع إليها)
+# بناء نص ولوحة الشاشة الرئيسية / شاشة الاختيار
 # ---------------------------------------------------------------------------
 
 def start_text_and_keyboard(intro_note=""):
-    """نص ولوحة شاشة البداية (3 أزرار، بدون سنوات)."""
     text = intro_note or "اختر ما تريد القيام به:"
     return text, build_start_keyboard()
 
 
 def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
-    """نص ولوحة شاشة الاختيار (السنوات + اختيارات المواد)."""
     has_selection = len(selected_list) > 0
     text = intro_note
     text += selected_courses_block(years_data, selected_list)
 
     if not schedule_file_exists():
-        text += "لم يتم جلب بيانات الجدول حتى الآن. ارجع واضغط تحديث أوقات الجدول."
+        text += "لم يتم جلب بيانات الجدول حتى الآن. اضغط 'القائمة الرئيسية' ثم 'تحديث أوقات الجدول'."
     else:
         if mode == "optimize":
             text += "اختر المواد التي تريد توليد جدول منها"
@@ -394,18 +416,6 @@ def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
             text += "اختر المواد التي تريد عرض أوقاتها."
 
     keyboard = build_selection_keyboard(years_data, mode, has_selection)
-    return text, keyboard
-
-
-def home_text_and_keyboard(years_data, selected_list, intro_note=""):
-    """wrapper للتوافق الخلفي — يستخدمه كود الحذف والرجوع القديم."""
-    has_selection = len(selected_list) > 0
-    text = intro_note + selected_courses_block(years_data, selected_list)
-    if not schedule_file_exists():
-        text += "لم يتم جلب بيانات الجدول حتى الآن."
-    else:
-        text += "اختر السنة الدراسية للمتابعة."
-    keyboard = build_home_keyboard(years_data, has_selection)
     return text, keyboard
 
 
@@ -422,12 +432,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    أمر /stats: يعرض عدد المستخدمين الفريدين الذين تفاعلوا مع البوت منذ
-    آخر إعادة تشغيل، ومدة التشغيل الحالية. هذا العدد يُصفَّر تلقائيًا عند
-    أي إعادة تشغيل للخدمة (مثلًا بعد رفع تحديث جديد على GitHub)، لأنه
-    محفوظ في الذاكرة فقط، وليس عدّادًا دائمًا.
-    """
     uptime = datetime.now(timezone.utc) - _bot_start_time
     hours, remainder = divmod(int(uptime.total_seconds()), 3600)
     minutes, _ = divmod(remainder, 60)
@@ -442,21 +446,6 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ملاحظة: هذا العدد يبدأ من الصفر مع كل إعادة تشغيل للبوت."
     )
     await update.message.reply_text(text)
-
-
-async def go_home(query, context, selected_list, intro_note="", mode=None):
-    """
-    يُعيد المستخدم للشاشة المناسبة:
-    - إن لم يكن mode محدّدًا (None): يعيد شاشة الاختيار بوضع "show" كافتراضي
-      (هذا يحدث عند الرجوع من قائمة مواد السنة، أو في سياقات التوافق الخلفي).
-      شاشة البداية (3 أزرار) لا تُعرض إلا بعد تصفير كامل للجلسة
-      (show_schedule / optimize_schedule / run_update_schedule).
-    - إن كان mode محدّدًا ("show"/"optimize"): يعيد شاشة الاختيار بالوضع الصحيح.
-    """
-    years_data = sd.load_courses()
-    effective_mode = mode if mode is not None else "show"
-    text, keyboard = selection_text_and_keyboard(years_data, effective_mode, selected_list, intro_note=intro_note)
-    await query.edit_message_text(text, reply_markup=keyboard)
 
 
 async def show_year_courses(query, context, year):
@@ -488,68 +477,33 @@ async def select_course(query, context, year, code):
     if (year, code) not in session["selected"]:
         session["selected"].append((year, code))
 
-    await go_home(query, context, session["selected"], mode=session.get("mode"))
+    # اختيار مادة من شاشة السنة يعيدنا مباشرة لشاشة الاختيار التي جئنا
+    # منها -- وهذا تمامًا سلوك زر "رجوع"، فنعيد استخدامه.
+    await go_back(query, context, user_id)
 
 
-async def back_home(query, context):
-    """رجوع حقيقي بدون تصفير: يعيد شاشة الاختيار مع الاختيارات كما هي."""
-    user_id = query.from_user.id
-    session = get_session(user_id)
-    await go_home(query, context, session["selected"], mode=session.get("mode"))
-
-
-async def show_delete_menu(query, context, return_to):
+async def show_delete_menu(query, context):
     user_id = query.from_user.id
     session = get_session(user_id)
     years_data = sd.load_courses()
 
     if not session["selected"]:
-        # حالة احتياطية: لا يجب أن يظهر الزر أصلًا بدون اختيار، لكن نحتاط لها
-        await go_home(query, context, session["selected"])
+        await go_back(query, context, user_id)
         return
 
-    text = "اختر المادة التي تريد حذفها من قائمة اختياراتك:"
-    keyboard = build_delete_keyboard(years_data, session["selected"], return_to)
+    text = "اختر المادة التي تريد حذفها من قائمة اختياراتك، أو اضغط رجوع للعودة بدون حذف:"
+    keyboard = build_delete_keyboard(years_data, session["selected"])
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
-async def delete_course(query, context, year, code, return_to):
+async def delete_course(query, context, year, code):
     user_id = query.from_user.id
     session = get_session(user_id)
     session["selected"] = [
         (y, c) for (y, c) in session["selected"] if not (y == year and c == code)
     ]
-    await _return_after_delete(query, context, return_to)
-
-
-async def cancel_delete(query, context, return_to):
-    await _return_after_delete(query, context, return_to)
-
-
-async def _return_after_delete(query, context, return_to):
-    """يعيد المستخدم إلى الشاشة التي جاء منها قبل فتح قائمة الحذف."""
-    user_id = query.from_user.id
-    session = get_session(user_id)
-    years_data = sd.load_courses()
-    mode = session.get("mode")
-
-    if return_to == "home":
-        await go_home(query, context, session["selected"], mode=mode)
-        return
-
-    if return_to.startswith("year-"):
-        year = int(return_to.split("-", 1)[1])
-        selected_codes = {code for (y, code) in session["selected"] if y == year}
-        has_selection = len(session["selected"]) > 0
-        year_label = YEAR_NAMES.get(year, f"السنة {year}")
-        text = f"مواد {year_label}\n\nاختر مادة:"
-        await query.edit_message_text(
-            text,
-            reply_markup=build_year_courses_keyboard(years_data, year, selected_codes, has_selection),
-        )
-        return
-
-    await go_home(query, context, session["selected"], mode=mode)
+    # الحذف يعيد المستخدم لنفس الشاشة التي جاء منها -- سلوك "رجوع" نفسه.
+    await go_back(query, context, user_id)
 
 
 async def show_schedule(query, context):
@@ -585,7 +539,6 @@ async def show_schedule(query, context):
                 except OSError:
                     pass
 
-    # تصفير كامل والعودة لشاشة البداية (3 أزرار)
     reset_session(user_id)
     start_text, start_kb = start_text_and_keyboard()
     await context.bot.send_message(
@@ -602,7 +555,6 @@ async def run_update_schedule(query, context):
         return
 
     user_id = query.from_user.id
-    session = get_session(user_id)
     had_data_before = schedule_file_exists()
 
     await query.answer("بدأ التحديث، قد يستغرق هذا دقيقة...")
@@ -637,7 +589,7 @@ async def run_update_schedule(query, context):
         logger.exception("خطأ غير متوقع أثناء تشغيل extract_schedule.py")
 
     _last_update_ts["value"] = time.time()
-    years_data = sd.load_courses(force_reload=True)
+    sd.load_courses(force_reload=True)
     asyncio.create_task(asyncio.to_thread(notifier.notify_update_result, success, error_snippet))
 
     if success:
@@ -654,21 +606,12 @@ async def run_update_schedule(query, context):
             note += f"تفاصيل: {error_snippet}\n"
         note += "\n"
 
-    # بعد التحديث دائمًا نعود لشاشة البداية (3 أزرار) لا لشاشة الاختيار،
-    # لأن التحديث لا ينتمي لأي مسار (optimize/show) بل هو عملية مستقلة.
     reset_session(user_id)
     start_text, start_kb = start_text_and_keyboard(intro_note=note)
     await query.edit_message_text(start_text, reply_markup=start_kb)
 
 
 def build_optimized_text(result):
-    """
-    يبني نص الرسالة النصية لنتيجة " توليد جدول مواد تلقائي"
-
-    result: القاموس المُعاد من find_best_schedules.
-    يُعيد نصًا واضحًا يوضح: إحصائيات الجودة (أيام/فجوات)، المواد المُستثناة
-    إن وُجدت مع سبب مفهوم، ثم تفاصيل الجدول يومًا بيوم مرتبة زمنيًا.
-    """
     if result["timed_out"] and not result["schedules"]:
         return (
             "انتهى وقت المعالجة قبل إيجاد جدول مثالي.\n"
@@ -706,7 +649,6 @@ def build_optimized_text(result):
         for name in result["no_data_courses"]:
             lines.append(f"  • {name}")
 
-    # ترتيب الجلسات يومًا بيوم
     by_day = {}
     for o in best["options"]:
         for s in o.sessions:
@@ -727,7 +669,9 @@ def build_optimized_text(result):
 
 
 async def send_all_times_pdf(query, context):
-    """يبني ويرسل PDF بأوقات جميع المواد من كل السنوات."""
+    """يبني ويرسل PDF بأوقات جميع المواد من كل السنوات، ثم يعيد عرض نفس
+    شاشة الاختيار الحالية (لا يعتبر هذا تنقّلاً لشاشة جديدة، فلا يغيّر
+    مكدّس التنقّل)."""
     await query.answer()
     await query.edit_message_text("جاري تجميع أوقات جميع المواد في ملف PDF...\nقد يستغرق هذا لحظة.")
 
@@ -758,7 +702,6 @@ async def send_all_times_pdf(query, context):
             except OSError:
                 pass
 
-    # نعود لشاشة الاختيار مع الحفاظ على mode (لا نصفّر)
     session = get_session(user_id)
     text, keyboard = selection_text_and_keyboard(years_data, session.get("mode", "show"), session["selected"])
     await context.bot.send_message(
@@ -809,11 +752,11 @@ async def optimize_schedule(query, context):
         os.makedirs(TEMP_DIR, exist_ok=True)
         pdf_path = os.path.join(TEMP_DIR, f"optimal_{user_id}.pdf")
         try:
-            stats = [f"عدد أيام الحضور: {best['days_count']}  |  مجموع الفراغات: {best['total_gap_minutes']} دقيقة"]
+            stats_lines = [f"عدد أيام الحضور: {best['days_count']}  |  مجموع الفراغات: {best['total_gap_minutes']} دقيقة"]
             if result["excluded_courses"]:
                 excl = "، ".join(e["name"] for e in result["excluded_courses"])
-                stats.append(f"مواد مستثناة: {excl}")
-            pdf_export.build_optimized_schedule_pdf(best["options"], pdf_path, stats_lines=stats)
+                stats_lines.append(f"مواد مستثناة: {excl}")
+            pdf_export.build_optimized_schedule_pdf(best["options"], pdf_path, stats_lines=stats_lines)
             with open(pdf_path, "rb") as f:
                 await context.bot.send_document(
                     chat_id=query.message.chat_id,
@@ -830,7 +773,6 @@ async def optimize_schedule(query, context):
                 except OSError:
                     pass
 
-    # تصفير كامل والعودة لشاشة البداية
     reset_session(user_id)
     start_text, start_kb = start_text_and_keyboard()
     await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
@@ -844,21 +786,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     username = query.from_user.username
+    session = get_session(user_id)
 
-    # تسجيل الحدث في سجل المستخدم الخاص بالإشعارات (notifier)، بحسب نوع
-    # الضغطة. يُنفَّذ في الخلفية (asyncio.create_task + to_thread) وليس
-    # بانتظار مباشر، لأن notifier.log_event يقوم بطلبات شبكية متزامنة
-    # (Upstash + Telegram) قد تستغرق وقتًا، وانتظارها مباشرة كان يُجمّد
-    # استجابة البوت لكل المستخدمين حتى تكتمل. هذا منفصل تمامًا عن منطق
-    # البوت نفسه ولا يؤثر عليه إن تأخر أو فشل.
     def _fire_log_event(event_type, value=""):
         asyncio.create_task(asyncio.to_thread(notifier.log_event, user_id, username, event_type, value))
 
-    if data == "back_home":
+    if data == "back" or data == "go_start":
         _fire_log_event("back_button")
     elif data.startswith("year:"):
-        year_value = data.split(":", 1)[1]
-        _fire_log_event("select_year", year_value)
+        _fire_log_event("select_year", data.split(":", 1)[1])
     elif data.startswith("course:"):
         _, year_str, code = data.split(":", 2)
         years_data_for_log = sd.load_courses()
@@ -883,10 +819,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("mode:"):
-        # اختيار المسار (توليد أفضل جدول أو عرض الأوقات) من شاشة البداية
+        # اختيار المسار من الشاشة الرئيسية: نحفظ الرئيسية في المكدّس قبل
+        # الانتقال، حتى يعمل "رجوع" من شاشة الاختيار بشكل صحيح.
         await query.answer()
-        chosen_mode = data.split(":", 1)[1]  # "optimize" أو "show"
-        session = get_session(user_id)
+        chosen_mode = data.split(":", 1)[1]
+        push_screen(session, SCREEN_START)
         session["mode"] = chosen_mode
         years_data = sd.load_courses()
         text, keyboard = selection_text_and_keyboard(years_data, chosen_mode, session["selected"])
@@ -897,32 +834,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_all_times_pdf(query, context)
         return
 
-    if data == "back_home":
+    if data == "back":
         await query.answer()
-        await back_home(query, context)
+        await go_back(query, context, user_id)
+        return
+
+    if data == "go_start":
+        await query.answer()
+        await go_start(query, context, user_id)
         return
 
     if data.startswith("delete_menu:"):
         await query.answer()
-        return_to = data.split(":", 1)[1]
-        await show_delete_menu(query, context, return_to)
+        origin = data.split(":", 1)[1]  # "home" أو "year-<رقم السنة>"
+        if origin.startswith("year-"):
+            push_screen(session, screen_year(int(origin.split("-", 1)[1])))
+        else:
+            push_screen(session, screen_selection(session.get("mode") or "show"))
+        await show_delete_menu(query, context)
         return
 
     if data.startswith("delete_course:"):
         await query.answer()
-        _, year_str, code, return_to = data.split(":", 3)
-        await delete_course(query, context, int(year_str), code, return_to)
-        return
-
-    if data.startswith("cancel_delete:"):
-        await query.answer()
-        return_to = data.split(":", 1)[1]
-        await cancel_delete(query, context, return_to)
+        _, year_str, code = data.split(":", 2)
+        await delete_course(query, context, int(year_str), code)
         return
 
     if data.startswith("year:"):
         await query.answer()
         year = int(data.split(":")[1])
+        push_screen(session, screen_selection(session.get("mode") or "show"))
         await show_year_courses(query, context, year)
         return
 
@@ -946,21 +887,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def healthcheck(request):
-    """
-    مسار بسيط يرجّع 200 OK دائمًا. هذا ما تستخدمه خدمة "التشعيل الدوري"
-    الخارجية (uptime pinger) لإبقاء خدمة Render مستيقظة ومنعها من الدخول
-    في وضع السكون بعد فترة من عدم النشاط.
-    """
     return PlainTextResponse("OK")
 
 
 async def run_webhook_server(app):
-    """
-    يشغّل البوت بوضع Webhook عبر خادم مخصص (starlette + uvicorn) بدل
-    الخادم المدمج في المكتبة، لأن الخادم المدمج يرفض أي طلب على مسارات
-    أخرى (يرد 405)، بينما نحتاج هنا مسار /healthcheck يستجيب دائمًا
-    بنجاح لخدمة الـ ping الخارجية التي تمنع Render من تعطيل الخدمة.
-    """
     port = int(os.environ.get("PORT", "10000"))
     external_url = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
     webhook_path = "webhook"
@@ -1011,9 +941,6 @@ def main():
         )
         return
 
-    # وضع Webhook: يُستخدم تلقائيًا عند التشغيل على استضافة سحابية مثل
-    # Render، التي تضبط RENDER_EXTERNAL_URL تلقائيًا لكل خدمة. يمكن أيضًا
-    # ضبط WEBHOOK_URL يدويًا على أي منصة أخرى لتفعيل هذا الوضع.
     external_url = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 
     if external_url:
