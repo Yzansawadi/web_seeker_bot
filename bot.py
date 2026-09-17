@@ -5,10 +5,11 @@ bot.py
 ------
 بوت تيليغرام لجدول مواد جامعة IUST (WEB SEEKER).
 
-تمت إضافة ميزة المقارنة:
-- يتم مقارنة الجدول القديم بالجديد بعد التحديث.
-- إرسال الإضافات والتغييرات كرسالة وملف PDF.
-- العودة التلقائية للقائمة الرئيسية.
+نظام التنقّل (مُعاد بناؤه بالكامل):
+- مكدّس شاشات (session["stack"]) لزر "رجوع".
+- زر "القائمة الرئيسية" يعيد المستخدم فورًا لشاشة البداية دون تصفير المواد المختارة.
+- نظام مقارنة ذكي يصنف التغييرات (أوقات، دكاترة، قاعات، إضافات وحذوفات).
+- إرسال التقرير كرسالة مباشرة وملف PDF ثم العودة تلقائياً للقائمة الرئيسية.
 """
 
 import os
@@ -17,7 +18,6 @@ import logging
 import subprocess
 import sys
 import asyncio
-import json
 from datetime import datetime, timezone
 
 for _stream_name in ("stdout", "stderr"):
@@ -82,11 +82,12 @@ YEAR_NAMES = {
 }
 
 # ---------------------------------------------------------------------------
-# حالة كل مستخدم
+# حالة كل مستخدم (في الذاكرة فقط، تُفقد عند إعادة تشغيل البوت)
 # ---------------------------------------------------------------------------
 user_sessions = {}
 seen_users = set()
 _bot_start_time = datetime.now(timezone.utc)
+
 
 def track_user(user):
     is_new = user.id not in seen_users
@@ -99,29 +100,37 @@ def track_user(user):
             asyncio.to_thread(notifier.register_new_user, user.id, user.username)
         )
 
+
 def get_session(user_id):
     s = user_sessions.setdefault(user_id, {"selected": [], "mode": None, "stack": []})
     s.setdefault("mode", None)
     s.setdefault("stack", [])
     return s
 
+
 def reset_session(user_id):
     user_sessions[user_id] = {"selected": [], "mode": None, "stack": []}
     return user_sessions[user_id]
 
+
 # ---------------------------------------------------------------------------
-# مكدّس التنقّل
+# مكدّس التنقّل: كل شاشة تُمثَّل بـ tuple بسيط
 # ---------------------------------------------------------------------------
+
 SCREEN_START = ("start",)
+
 
 def screen_selection(mode):
     return ("selection", mode)
 
+
 def screen_year(year):
     return ("year", year)
 
+
 def push_screen(session, descriptor):
     session.setdefault("stack", []).append(descriptor)
+
 
 def pop_screen(session):
     stack = session.setdefault("stack", [])
@@ -129,29 +138,32 @@ def pop_screen(session):
         return stack.pop()
     return SCREEN_START
 
+
 async def render_screen(query, context, user_id, descriptor):
     session = get_session(user_id)
     kind = descriptor[0]
 
     if kind == "selection":
         years_data = sd.load_courses()
-        mode = descriptor[1]
+        mode = descriptor
         session["mode"] = mode
         text, keyboard = selection_text_and_keyboard(years_data, mode, session["selected"])
         await query.edit_message_text(text, reply_markup=keyboard)
         return
 
     if kind == "year":
-        await show_year_courses(query, context, descriptor[1])
+        await show_year_courses(query, context, descriptor)
         return
 
     text, keyboard = start_text_and_keyboard()
     await query.edit_message_text(text, reply_markup=keyboard)
 
+
 async def go_back(query, context, user_id):
     session = get_session(user_id)
     descriptor = pop_screen(session)
     await render_screen(query, context, user_id, descriptor)
+
 
 async def go_start(query, context, user_id):
     session = get_session(user_id)
@@ -159,16 +171,20 @@ async def go_start(query, context, user_id):
     text, keyboard = start_text_and_keyboard()
     await query.edit_message_text(text, reply_markup=keyboard)
 
+
 # ---------------------------------------------------------------------------
 # أدوات مساعدة
 # ---------------------------------------------------------------------------
+
 def schedule_file_exists():
     return os.path.exists(sd.SCHEDULE_PATH)
+
 
 def cooldown_remaining_seconds():
     elapsed = time.time() - _last_update_ts["value"]
     remaining = UPDATE_COOLDOWN_SECONDS - elapsed
     return max(0, int(remaining))
+
 
 def format_remaining(seconds):
     h, rem = divmod(seconds, 3600)
@@ -176,6 +192,7 @@ def format_remaining(seconds):
     if h > 0:
         return f"{h} ساعة و {m} دقيقة"
     return f"{m} دقيقة"
+
 
 def selected_courses_block(years_data, selected_list):
     if not selected_list:
@@ -187,17 +204,19 @@ def selected_courses_block(years_data, selected_list):
         lines.append(f"{i}. {name}")
     return "\n".join(lines) + "\n\n"
 
+
 # ---------------------------------------------------------------------------
-# منطق مقارنة الجدول (الإضافة الجديدة)
+# منطق مقارنة الجدول المصنف (الأوقات، الدكاترة، القاعات، الإضافات والحذف)
 # ---------------------------------------------------------------------------
-def compare_schedules(old_data, new_data):
-    """
-    يقارن البيانات القديمة بالجديدة لتحديد:
-    1. المواد الجديدة (الإضافات).
-    2. المواد التي تغيرت أوقاتها (التعديلات).
-    """
-    additions = []
-    changes = []
+
+def compare_schedules_categorized(old_data, new_data):
+    categories = {
+        "time_changes": [],
+        "teacher_changes": [],
+        "room_changes": [],
+        "additions": [],
+        "deletions": []
+    }
     
     old_courses = {}
     if old_data:
@@ -210,62 +229,151 @@ def compare_schedules(old_data, new_data):
         for y in sd.get_years(new_data):
             for c in sd.get_courses_for_year(new_data, y):
                 new_courses[(y, c['code'])] = c
-                
+
+    # 1. إضافات مواد كاملة
     for key, new_c in new_courses.items():
         if key not in old_courses:
-            additions.append((key[0], new_c))
-        else:
-            old_c = old_courses[key]
-            # نستخدم json.dumps لمقارنة قائمة الجلسات بدقة
-            old_sessions_str = json.dumps(old_c.get('sessions', []), sort_keys=True)
-            new_sessions_str = json.dumps(new_c.get('sessions', []), sort_keys=True)
-            if old_sessions_str != new_sessions_str:
-                changes.append((key[0], new_c, old_c))
-                
-    return additions, changes
+            categories["additions"].append(f"إضافة مادة كاملة: **{new_c['name']}** (السنة {key[0]})")
 
-def create_changes_html(additions, changes):
-    """يولد كود HTML بسيط لملف التغييرات."""
-    html = """
+    # 2. حذف مواد كاملة
+    for key, old_c in old_courses.items():
+        if key not in new_courses:
+            categories["deletions"].append(f"حذف مادة كاملة: **{old_c['name']}** (السنة {key[0]})")
+
+    # 3. مقارنة تفاصيل جلسات المواد المشتركة
+    for key, new_c in new_courses.items():
+        if key in old_courses:
+            old_c = old_courses[key]
+            course_name = new_c['name']
+            
+            old_dict = {}
+            for s in old_c.get('sessions', []):
+                k = f"{s.get('activity')}_{s.get('day')}"
+                counter = 1
+                while f"{k}_{counter}" in old_dict: counter += 1
+                old_dict[f"{k}_{counter}"] = s
+                
+            new_dict = {}
+            for s in new_c.get('sessions', []):
+                k = f"{s.get('activity')}_{s.get('day')}"
+                counter = 1
+                while f"{k}_{counter}" in new_dict: counter += 1
+                new_dict[f"{k}_{counter}"] = s
+                
+            for k, new_s in new_dict.items():
+                if k in old_dict:
+                    old_s = old_dict[k]
+                    activity_label = f"**{course_name}** ({new_s.get('activity')} — يوم {new_s.get('day')})"
+                    
+                    # أ) رصد تغيير الأوقات
+                    old_t_start = str(old_s.get('start') or "").strip()
+                    old_t_end = str(old_s.get('end') or "").strip()
+                    new_t_start = str(new_s.get('start') or "").strip()
+                    new_t_end = str(new_s.get('end') or "").strip()
+                    if old_t_start != new_t_start or old_t_end != new_t_end:
+                        categories["time_changes"].append(
+                            f"{activity_label}: من [{old_t_start} – {old_t_end}] ⬅️ أصبح [{new_t_start} – {new_t_end}]"
+                        )
+                        
+                    # ب) رصد تغيير الدكاترة والمشرفين
+                    old_teacher = str(old_s.get('teacher') or "").strip()
+                    new_teacher = str(new_s.get('teacher') or "").strip()
+                    o_clean = old_teacher if old_teacher and old_teacher not in ["د.ت", "م.ت", "غير محدد"] else "غير محدد"
+                    n_clean = new_teacher if new_teacher and new_teacher not in ["د.ت", "م.ت", "غير محدد"] else "غير محدد"
+                    if o_clean != n_clean:
+                        if o_clean == "غير محدد":
+                            categories["teacher_changes"].append(f"{activity_label}: تم تعيين/تثبيت المشرف ({n_clean})")
+                        elif n_clean == "غير محدد":
+                            categories["teacher_changes"].append(f"{activity_label}: إلغاء/مسح تعيين ({o_clean})")
+                        else:
+                            categories["teacher_changes"].append(f"{activity_label}: تغير الأستاذ من ({o_clean}) ⬅️ إلى ({n_clean})")
+
+                    # ج) رصد تغير القاعات
+                    old_room = str(old_s.get('room') or "").strip()
+                    new_room = str(new_s.get('room') or "").strip()
+                    r_old = old_room if old_room else "غير محددة"
+                    r_new = new_room if new_room else "غير محددة"
+                    if r_old != r_new:
+                        categories["room_changes"].append(
+                            f"{activity_label}: انتقلت القاعة من ({r_old}) ⬅️ إلى ({r_new})"
+                        )
+                else:
+                    categories["additions"].append(f"إضافة جلسة فرعية: **{course_name}** ({new_s.get('activity')} يوم {new_s.get('day')} الساعة {new_s.get('start')})")
+
+            for k, old_s in old_dict.items():
+                if k not in new_dict:
+                    categories["deletions"].append(f"حذف جلسة فرعية: **{course_name}** ({old_s.get('activity')} يوم {old_s.get('day')} الساعة {old_s.get('start')})")
+
+    # صياغة التقرير النصي
+    report_lines = []
+    if categories["time_changes"]:
+        report_lines.append("⏱️ **رصد تغيير الأوقات:**")
+        for item in categories["time_changes"]: report_lines.append(f"  • {item}")
+        report_lines.append("")
+        
+    if categories["teacher_changes"]:
+        report_lines.append("👨‍🏫 **رصد التغيير بين دكتور وآخر (المشرفين):**")
+        for item in categories["teacher_changes"]: report_lines.append(f"  • {item}")
+        report_lines.append("")
+        
+    if categories["room_changes"]:
+        report_lines.append("🚪 **رصد تغير القاعات:**")
+        for item in categories["room_changes"]: report_lines.append(f"  • {item}")
+        report_lines.append("")
+        
+    if categories["additions"]:
+        report_lines.append("🆕 **تصنيف الإضافات:**")
+        for item in categories["additions"]: report_lines.append(f"  • {item}")
+        report_lines.append("")
+        
+    if categories["deletions"]:
+        report_lines.append("❌ **تصنيف الحذوفات:**")
+        for item in categories["deletions"]: report_lines.append(f"  • {item}")
+        report_lines.append("")
+
+    if report_lines:
+        return "\n".join(report_lines)
+    return None
+
+
+def create_categorized_html(report_text):
+    html_body = report_text.replace('\n', '<br>')
+    html_body = html_body.replace('**', '<b>') # تبسيط أو تحسين ال tags
+    # معالجة بسيطة للعناوين البارزة
+    html = f"""
     <html dir="rtl" lang="ar">
     <head>
         <meta charset="utf-8">
         <style>
-            body { font-family: sans-serif; padding: 20px; line-height: 1.6; }
-            h1 { color: #2c3e50; text-align: center; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
-            h2 { color: #2980b9; margin-top: 20px; }
-            ul { list-style-type: none; padding-right: 0; }
-            li { background: #ecf0f1; margin-bottom: 10px; padding: 10px; border-radius: 5px; border-right: 4px solid #3498db; }
-            .course-title { font-weight: bold; color: #c0392b; font-size: 1.1em; }
+            body {{ font-family: Tahoma, sans-serif; padding: 25px; line-height: 1.8; color: #333; background: #fdfdfd; }}
+            h1 {{ color: #2c3e50; text-align: center; border-bottom: 3px solid #3498db; padding-bottom: 12px; }}
+            .section {{ background: #fff; padding: 15px 20px; margin-bottom: 15px; border-radius: 8px; border-right: 5px solid #3498db; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
+            ul {{ margin: 0; padding-right: 20px; }}
+            li {{ margin-bottom: 6px; }}
+            b {{ color: #c0392b; }}
         </style>
     </head>
     <body>
-        <h1>تقرير تحديثات الجدول</h1>
+        <h1>تقرير تحديثات وتغييرات الجدول (WEB SEEKER)</h1>
+        <div style="font-size: 15px;">
+            {report_text.replace('\n', '<br>').replace('⏱️', '<h2>⏱️</h2>').replace('👨‍🏫', '<h2>👨‍🏫</h2>').replace('🚪', '<h2>🚪</h2>').replace('🆕', '<h2>🆕</h2>').replace('❌', '<h2>❌</h2>')}
+        </div>
+    </body>
+    </html>
     """
-    if additions:
-        html += "<h2>المواد الجديدة المضافة:</h2><ul>"
-        for y, c in additions:
-            html += f"<li><span class='course-title'>{c['name']}</span> (السنة {y}) - الرمز: {c['code']}</li>"
-        html += "</ul>"
-        
-    if changes:
-        html += "<h2>المواد التي تغيرت أوقاتها:</h2><ul>"
-        for y, new_c, old_c in changes:
-            html += f"<li><span class='course-title'>{new_c['name']}</span> (السنة {y}) - الرمز: {new_c['code']}<br>"
-            html += "<i>تم رصد تغيير في الجلسات مقارنة بالجدول السابق.</i></li>"
-        html += "</ul>"
-        
-    html += "</body></html>"
     return html
+
 
 # ---------------------------------------------------------------------------
 # بناء لوحات الأزرار
 # ---------------------------------------------------------------------------
+
 def nav_row():
     return [
         InlineKeyboardButton("رجوع", callback_data="back"),
         InlineKeyboardButton("القائمة الرئيسية", callback_data="go_start"),
     ]
+
 
 def build_start_keyboard():
     rows = []
@@ -279,6 +387,7 @@ def build_start_keyboard():
     rows.append([InlineKeyboardButton("توليد أفضل جدول ممكن", callback_data="mode:optimize")])
     rows.append([InlineKeyboardButton("عرض أوقات المواد فقط", callback_data="mode:show")])
     return InlineKeyboardMarkup(rows)
+
 
 def build_selection_keyboard(years_data, mode, has_selection):
     rows = []
@@ -301,6 +410,7 @@ def build_selection_keyboard(years_data, mode, has_selection):
     rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
+
 def build_delete_keyboard(years_data, selected_list):
     rows = []
     for year, code in selected_list:
@@ -309,6 +419,7 @@ def build_delete_keyboard(years_data, selected_list):
         rows.append([InlineKeyboardButton(name, callback_data=f"delete_course:{year}:{code}")])
     rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
+
 
 def build_year_courses_keyboard(years_data, year, selected_codes, has_selection):
     rows = []
@@ -322,9 +433,11 @@ def build_year_courses_keyboard(years_data, year, selected_codes, has_selection)
     rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
+
 # ---------------------------------------------------------------------------
 # أدوات تنسيق النصوص
 # ---------------------------------------------------------------------------
+
 def build_full_schedule_text(years_data, selected_list):
     if not selected_list:
         return "لم تقم باختيار أي مادة حتى الآن."
@@ -354,9 +467,11 @@ def build_full_schedule_text(years_data, selected_list):
             )
     return "\n".join(lines)
 
+
 def start_text_and_keyboard(intro_note=""):
     text = intro_note or "اختر ما تريد القيام به:"
     return text, build_start_keyboard()
+
 
 def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
     has_selection = len(selected_list) > 0
@@ -372,15 +487,18 @@ def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
     keyboard = build_selection_keyboard(years_data, mode, has_selection)
     return text, keyboard
 
+
 # ---------------------------------------------------------------------------
 # المعالجات (Handlers)
 # ---------------------------------------------------------------------------
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     track_user(update.effective_user)
     reset_session(user_id)
     text, keyboard = start_text_and_keyboard(intro_note=" اهلا بك في بوت WEB SEEKER. \n\n")
     await update.message.reply_text(text, reply_markup=keyboard)
+
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now(timezone.utc) - _bot_start_time
@@ -396,6 +514,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text)
 
+
 async def show_year_courses(query, context, year):
     user_id = query.from_user.id
     session = get_session(user_id)
@@ -409,6 +528,7 @@ async def show_year_courses(query, context, year):
         reply_markup=build_year_courses_keyboard(years_data, year, selected_codes, has_selection),
     )
 
+
 async def select_course(query, context, year, code):
     user_id = query.from_user.id
     session = get_session(user_id)
@@ -421,6 +541,7 @@ async def select_course(query, context, year, code):
         session["selected"].append((year, code))
     await go_back(query, context, user_id)
 
+
 async def show_delete_menu(query, context):
     user_id = query.from_user.id
     session = get_session(user_id)
@@ -432,6 +553,7 @@ async def show_delete_menu(query, context):
     keyboard = build_delete_keyboard(years_data, session["selected"])
     await query.edit_message_text(text, reply_markup=keyboard)
 
+
 async def delete_course(query, context, year, code):
     user_id = query.from_user.id
     session = get_session(user_id)
@@ -439,6 +561,7 @@ async def delete_course(query, context, year, code):
         (y, c) for (y, c) in session["selected"] if not (y == year and c == code)
     ]
     await go_back(query, context, user_id)
+
 
 async def show_schedule(query, context):
     user_id = query.from_user.id
@@ -475,6 +598,7 @@ async def show_schedule(query, context):
     await context.bot.send_message(
         chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb
     )
+
 
 async def run_update_schedule(query, context):
     remaining = cooldown_remaining_seconds()
@@ -530,46 +654,34 @@ async def run_update_schedule(query, context):
     if success:
         note = "تم تحديث الجدول بنجاح بأحدث البيانات من موقع الجامعة.\n\n"
         
-        # 3. مقارنة البيانات القديمة والجديدة لمعرفة التغييرات
+        # 3. مقارنة البيانات المصنفة
         if old_years_data and new_years_data:
-            additions, changes = compare_schedules(old_years_data, new_years_data)
+            report_text = compare_schedules_categorized(old_years_data, new_years_data)
             
-            if additions or changes:
-                msg_text = "⚠️ **تنبيه بالتغييرات في الجدول:**\n\n"
-                if additions:
-                    msg_text += "🆕 **المواد المضافة حديثاً:**\n"
-                    for y, c in additions:
-                        msg_text += f"- {c['name']} (سنة {y})\n"
-                    msg_text += "\n"
-                    
-                if changes:
-                    msg_text += "🔄 **المواد التي تغيرت أوقاتها:**\n"
-                    for y, new_c, _ in changes:
-                        msg_text += f"- {new_c['name']} (سنة {y})\n"
-                        
-                # إرسال رسالة التنبيه المباشرة للمستخدم
+            if report_text:
+                msg_text = "⚠️ **تنبيه بالتغييرات والتحديثات في الجدول:**\n\n" + report_text
+                # إرسال الرسالة المباشرة
                 await context.bot.send_message(chat_id=query.message.chat_id, text=msg_text, parse_mode='Markdown')
                 
-                # إنشاء ملف PDF للتغييرات
+                # إنشاء وترتيب ملف PDF للتغييرات المصنفة
                 os.makedirs(TEMP_DIR, exist_ok=True)
-                changes_pdf_path = os.path.join(TEMP_DIR, f"WEB_SEEKER_updates_{user_id}.pdf")
+                changes_pdf_path = os.path.join(TEMP_DIR, f"WEB_SEEKER_categorized_updates_{user_id}.pdf")
                 try:
-                    # محاولة استخدام WeasyPrint إذا كان متوفراً لتحويل HTML لـ PDF، وإلا يمكن التوجيه لمكتبتك المفضلة (pdf_export)
                     from weasyprint import HTML
-                    html_content = create_changes_html(additions, changes)
+                    html_content = create_categorized_html(report_text)
                     HTML(string=html_content).write_pdf(changes_pdf_path)
                     
                     with open(changes_pdf_path, "rb") as f:
                         await context.bot.send_document(
                             chat_id=query.message.chat_id,
                             document=f,
-                            filename="WEB_SEEKER_updates.pdf",
-                            caption="📄 تقرير مفصل بالتغييرات والإضافات"
+                            filename="WEB_SEEKER_updates_report.pdf",
+                            caption="📄 التقرير المفصل للتغييرات والإضافات"
                         )
                 except ImportError:
-                    logger.warning("مكتبة weasyprint غير مثبتة، سيتم إرسال التقرير كنص فقط.")
+                    logger.warning("مكتبة weasyprint غير مثبتة، اكتفى البوت بالرسالة النصية.")
                 except Exception as e:
-                    logger.error(f"خطأ أثناء إنشاء ملف PDF للتغييرات: {e}")
+                    logger.error(f"خطأ أثناء إنشاء ملف PDF: {e}")
                 finally:
                     if os.path.exists(changes_pdf_path):
                         try:
@@ -577,7 +689,10 @@ async def run_update_schedule(query, context):
                         except OSError:
                             pass
             else:
-                await context.bot.send_message(chat_id=query.message.chat_id, text="✅ لم يتم رصد أي تغييرات في أوقات المواد بعد هذا التحديث.")
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id, 
+                    text="✅ تم التحديث بنجاح، ولم يتم رصد أي فروقات أو تغييرات في الأوقات، القاعات، أو الأساتذة."
+                )
     elif had_data_before:
         note = "لم يكتمل التحديث بنجاح. سيتم الاستمرار باستخدام البيانات من آخر تحديث ناجح.\n\n"
     else:
@@ -588,14 +703,13 @@ async def run_update_schedule(query, context):
 
     reset_session(user_id)
     
-    # 4. العودة التلقائية إلى القائمة الرئيسية
+    # 4. العودة التلقائية الفورية إلى القائمة الرئيسية
     start_text, start_kb = start_text_and_keyboard(intro_note=note)
-    
     try:
         await query.edit_message_text(start_text, reply_markup=start_kb)
     except Exception:
-        # إذا تم حذف الرسالة الأصلية بسبب إرسال الرسائل المباشرة بالأعلى
         await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
+
 
 async def send_all_times_pdf(query, context):
     await query.answer()
@@ -631,6 +745,7 @@ async def send_all_times_pdf(query, context):
         chat_id=query.message.chat_id, text=text, reply_markup=keyboard
     )
 
+
 def build_optimized_text(result):
     if result["timed_out"] and not result["schedules"]:
         return "انتهى وقت المعالجة قبل إيجاد جدول مثالي.\nجرّب اختيار عدد أقل من المواد."
@@ -663,6 +778,7 @@ def build_optimized_text(result):
             lines.append(f"  {s['start']} – {s['end']}  —  {name}")
             lines.append(f"      {activity}{room}{teacher}")
     return "\n".join(lines)
+
 
 async def optimize_schedule(query, context):
     user_id = query.from_user.id
@@ -715,12 +831,12 @@ async def optimize_schedule(query, context):
     start_text, start_kb = start_text_and_keyboard()
     await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
 
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     track_user(query.from_user)
     user_id = query.from_user.id
-    username = query.from_user.username
     session = get_session(user_id)
 
     if data == "update_cooldown":
@@ -734,7 +850,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("mode:"):
         await query.answer()
-        chosen_mode = data.split(":", 1)[1]
+        chosen_mode = data.split(":", 1)
         push_screen(session, SCREEN_START)
         session["mode"] = chosen_mode
         years_data = sd.load_courses()
@@ -758,9 +874,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("delete_menu:"):
         await query.answer()
-        origin = data.split(":", 1)[1]
+        origin = data.split(":", 1)
         if origin.startswith("year-"):
-            push_screen(session, screen_year(int(origin.split("-", 1)[1])))
+            push_screen(session, screen_year(int(origin.split("-", 1))))
         else:
             push_screen(session, screen_selection(session.get("mode") or "show"))
         await show_delete_menu(query, context)
@@ -774,7 +890,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("year:"):
         await query.answer()
-        year = int(data.split(":")[1])
+        year = int(data.split(":"))
         push_screen(session, screen_selection(session.get("mode") or "show"))
         await show_year_courses(query, context, year)
         return
@@ -795,8 +911,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
 
+
 async def healthcheck(request):
     return PlainTextResponse("OK")
+
 
 async def run_webhook_server(app):
     port = int(os.environ.get("PORT", "10000"))
@@ -832,6 +950,7 @@ async def run_webhook_server(app):
         finally:
             await app.stop()
 
+
 def main():
     if BOT_TOKEN == "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE":
         print("خطأ: يجب ضبط توكن البوت أولًا.")
@@ -849,6 +968,7 @@ def main():
         app.add_handler(CommandHandler("stats", stats))
         app.add_handler(CallbackQueryHandler(button_handler))
         app.run_polling()
+
 
 if __name__ == "__main__":
     main()
