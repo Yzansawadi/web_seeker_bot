@@ -5,11 +5,11 @@ bot.py
 ------
 بوت تيليغرام لجدول مواد جامعة IUST (WEB SEEKER).
 
-نظام التنقّل (مُعاد بناؤه بالكامل):
-- مكدّس شاشات (session["stack"]) لزر "رجوع".
-- زر "القائمة الرئيسية" يعيد المستخدم فورًا لشاشة البداية دون تصفير المواد المختارة.
-- نظام مقارنة ذكي يصنف التغييرات (أوقات، دكاترة، قاعات، إضافات وحذوفات).
-- إرسال التقرير كرسالة مباشرة وملف PDF ثم العودة تلقائياً للقائمة الرئيسية.
+نظام التنقّل ومقارنة التحديثات:
+- مقارنة ذكية ومصنفة (أوقات، دكاترة، قاعات، إضافات وحذوفات).
+- إرسال تنبيه قصير آمن من تجاوز الحروف في تيليغرام.
+- وضع التقرير المفصل بالكامل في ملف PDF.
+- العودة التلقائية الفورية للقائمة الرئيسية.
 """
 
 import os
@@ -82,7 +82,7 @@ YEAR_NAMES = {
 }
 
 # ---------------------------------------------------------------------------
-# حالة كل مستخدم (في الذاكرة فقط، تُفقد عند إعادة تشغيل البوت)
+# حالة كل مستخدم
 # ---------------------------------------------------------------------------
 user_sessions = {}
 seen_users = set()
@@ -114,7 +114,7 @@ def reset_session(user_id):
 
 
 # ---------------------------------------------------------------------------
-# مكدّس التنقّل: كل شاشة تُمثَّل بـ tuple بسيط
+# مكدّس التنقّل
 # ---------------------------------------------------------------------------
 
 SCREEN_START = ("start",)
@@ -145,14 +145,15 @@ async def render_screen(query, context, user_id, descriptor):
 
     if kind == "selection":
         years_data = sd.load_courses()
-        mode = descriptor
+        mode = descriptor if len(descriptor) > 1 else None
         session["mode"] = mode
         text, keyboard = selection_text_and_keyboard(years_data, mode, session["selected"])
         await query.edit_message_text(text, reply_markup=keyboard)
         return
 
     if kind == "year":
-        await show_year_courses(query, context, descriptor)
+        year_val = descriptor if len(descriptor) > 1 else 1
+        await show_year_courses(query, context, year_val)
         return
 
     text, keyboard = start_text_and_keyboard()
@@ -233,12 +234,12 @@ def compare_schedules_categorized(old_data, new_data):
     # 1. إضافات مواد كاملة
     for key, new_c in new_courses.items():
         if key not in old_courses:
-            categories["additions"].append(f"إضافة مادة كاملة: **{new_c['name']}** (السنة {key[0]})")
+            categories["additions"].append(f"إضافة مادة كاملة: {new_c['name']} (السنة {key[0]})")
 
     # 2. حذف مواد كاملة
     for key, old_c in old_courses.items():
         if key not in new_courses:
-            categories["deletions"].append(f"حذف مادة كاملة: **{old_c['name']}** (السنة {key[0]})")
+            categories["deletions"].append(f"حذف مادة كاملة: {old_c['name']} (السنة {key[0]})")
 
     # 3. مقارنة تفاصيل جلسات المواد المشتركة
     for key, new_c in new_courses.items():
@@ -263,7 +264,7 @@ def compare_schedules_categorized(old_data, new_data):
             for k, new_s in new_dict.items():
                 if k in old_dict:
                     old_s = old_dict[k]
-                    activity_label = f"**{course_name}** ({new_s.get('activity')} — يوم {new_s.get('day')})"
+                    activity_label = f"{course_name} ({new_s.get('activity')} — يوم {new_s.get('day')})"
                     
                     # أ) رصد تغيير الأوقات
                     old_t_start = str(old_s.get('start') or "").strip()
@@ -298,65 +299,61 @@ def compare_schedules_categorized(old_data, new_data):
                             f"{activity_label}: انتقلت القاعة من ({r_old}) ⬅️ إلى ({r_new})"
                         )
                 else:
-                    categories["additions"].append(f"إضافة جلسة فرعية: **{course_name}** ({new_s.get('activity')} يوم {new_s.get('day')} الساعة {new_s.get('start')})")
+                    categories["additions"].append(f"إضافة جلسة فرعية: {course_name} ({new_s.get('activity')} يوم {new_s.get('day')} الساعة {new_s.get('start')})")
 
             for k, old_s in old_dict.items():
                 if k not in new_dict:
-                    categories["deletions"].append(f"حذف جلسة فرعية: **{course_name}** ({old_s.get('activity')} يوم {old_s.get('day')} الساعة {old_s.get('start')})")
+                    categories["deletions"].append(f"حذف جلسة فرعية: {course_name} ({old_s.get('activity')} يوم {old_s.get('day')} الساعة {old_s.get('start')})")
 
-    # صياغة التقرير النصي
+    # صياغة التقرير النصي للـ PDF
     report_lines = []
     if categories["time_changes"]:
-        report_lines.append("⏱️ **رصد تغيير الأوقات:**")
+        report_lines.append("⏱️ رصد تغيير الأوقات:")
         for item in categories["time_changes"]: report_lines.append(f"  • {item}")
         report_lines.append("")
         
     if categories["teacher_changes"]:
-        report_lines.append("👨‍🏫 **رصد التغيير بين دكتور وآخر (المشرفين):**")
+        report_lines.append("👨‍🏫 رصد التغيير بين دكتور وآخر (المشرفين):")
         for item in categories["teacher_changes"]: report_lines.append(f"  • {item}")
         report_lines.append("")
         
     if categories["room_changes"]:
-        report_lines.append("🚪 **رصد تغير القاعات:**")
+        report_lines.append("🚪 رصد تغير القاعات:")
         for item in categories["room_changes"]: report_lines.append(f"  • {item}")
         report_lines.append("")
         
     if categories["additions"]:
-        report_lines.append("🆕 **تصنيف الإضافات:**")
+        report_lines.append("🆕 تصنيف الإضافات:")
         for item in categories["additions"]: report_lines.append(f"  • {item}")
         report_lines.append("")
         
     if categories["deletions"]:
-        report_lines.append("❌ **تصنيف الحذوفات:**")
+        report_lines.append("❌ تصنيف الحذوفات:")
         for item in categories["deletions"]: report_lines.append(f"  • {item}")
         report_lines.append("")
 
-    if report_lines:
-        return "\n".join(report_lines)
-    return None
+    has_any = any(categories.values())
+    if has_any:
+        return "\n".join(report_lines), categories
+    return None, categories
 
 
 def create_categorized_html(report_text):
-    html_body = report_text.replace('\n', '<br>')
-    html_body = html_body.replace('**', '<b>') # تبسيط أو تحسين ال tags
-    # معالجة بسيطة للعناوين البارزة
+    safe_body = report_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
     html = f"""
     <html dir="rtl" lang="ar">
     <head>
         <meta charset="utf-8">
         <style>
-            body {{ font-family: Tahoma, sans-serif; padding: 25px; line-height: 1.8; color: #333; background: #fdfdfd; }}
+            body {{ font-family: Tahoma, sans-serif; padding: 25px; line-height: 1.8; color: #333; background: #fdfdfd; font-size: 13px; }}
             h1 {{ color: #2c3e50; text-align: center; border-bottom: 3px solid #3498db; padding-bottom: 12px; }}
-            .section {{ background: #fff; padding: 15px 20px; margin-bottom: 15px; border-radius: 8px; border-right: 5px solid #3498db; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-            ul {{ margin: 0; padding-right: 20px; }}
-            li {{ margin-bottom: 6px; }}
-            b {{ color: #c0392b; }}
+            .content {{ background: #fff; padding: 15px 20px; margin-bottom: 15px; border-radius: 8px; border-right: 5px solid #3498db; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
         </style>
     </head>
     <body>
         <h1>تقرير تحديثات وتغييرات الجدول (WEB SEEKER)</h1>
-        <div style="font-size: 15px;">
-            {report_text.replace('\n', '<br>').replace('⏱️', '<h2>⏱️</h2>').replace('👨‍🏫', '<h2>👨‍🏫</h2>').replace('🚪', '<h2>🚪</h2>').replace('🆕', '<h2>🆕</h2>').replace('❌', '<h2>❌</h2>')}
+        <div class="content">
+            {safe_body}
         </div>
     </body>
     </html>
@@ -656,14 +653,17 @@ async def run_update_schedule(query, context):
         
         # 3. مقارنة البيانات المصنفة
         if old_years_data and new_years_data:
-            report_text = compare_schedules_categorized(old_years_data, new_years_data)
+            report_text, cats = compare_schedules_categorized(old_years_data, new_years_data)
             
             if report_text:
-                msg_text = "⚠️ **تنبيه بالتغييرات والتحديثات في الجدول:**\n\n" + report_text
-                # إرسال الرسالة المباشرة
-                await context.bot.send_message(chat_id=query.message.chat_id, text=msg_text, parse_mode='Markdown')
+                # إرسال رسالة تنبيه قصيرة آمنة تماماً من الطول
+                short_msg = (
+                    "⚠️ **تم رصد تحديثات وتغييرات في الجدول الدراسي!**\n"
+                    "📄 تم تضمين التقرير المفصل المصنف (أوقات، دكاترة، قاعات، إضافات/حذف) في ملف الـ PDF المرفق أدناه."
+                )
+                await context.bot.send_message(chat_id=query.message.chat_id, text=short_msg, parse_mode='Markdown')
                 
-                # إنشاء وترتيب ملف PDF للتغييرات المصنفة
+                # إنشاء وإرسال ملف PDF المفصل
                 os.makedirs(TEMP_DIR, exist_ok=True)
                 changes_pdf_path = os.path.join(TEMP_DIR, f"WEB_SEEKER_categorized_updates_{user_id}.pdf")
                 try:
@@ -679,7 +679,7 @@ async def run_update_schedule(query, context):
                             caption="📄 التقرير المفصل للتغييرات والإضافات"
                         )
                 except ImportError:
-                    logger.warning("مكتبة weasyprint غير مثبتة، اكتفى البوت بالرسالة النصية.")
+                    logger.warning("مكتبة weasyprint غير مثبتة، تعذّر إرسال PDF.")
                 except Exception as e:
                     logger.error(f"خطأ أثناء إنشاء ملف PDF: {e}")
                 finally:
@@ -850,7 +850,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("mode:"):
         await query.answer()
-        chosen_mode = data.split(":", 1)
+        chosen_mode = data.split(":", 1) if ":" in data else "show"
         push_screen(session, SCREEN_START)
         session["mode"] = chosen_mode
         years_data = sd.load_courses()
@@ -874,9 +874,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("delete_menu:"):
         await query.answer()
-        origin = data.split(":", 1)
+        origin = data.split(":", 1) if ":" in data else "home"
         if origin.startswith("year-"):
-            push_screen(session, screen_year(int(origin.split("-", 1))))
+            try:
+                y_val = int(origin.split("-", 1))
+            except ValueError:
+                y_val = 1
+            push_screen(session, screen_year(y_val))
         else:
             push_screen(session, screen_selection(session.get("mode") or "show"))
         await show_delete_menu(query, context)
@@ -884,21 +888,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("delete_course:"):
         await query.answer()
-        _, year_str, code = data.split(":", 2)
-        await delete_course(query, context, int(year_str), code)
+        parts = data.split(":")
+        if len(parts) >= 3:
+            _, year_str, code = parts[0], parts, parts
+            try:
+                await delete_course(query, context, int(year_str), code)
+            except ValueError:
+                pass
         return
 
     if data.startswith("year:"):
         await query.answer()
-        year = int(data.split(":"))
-        push_screen(session, screen_selection(session.get("mode") or "show"))
-        await show_year_courses(query, context, year)
+        parts = data.split(":")
+        if len(parts) >= 2:
+            try:
+                year = int(parts)
+                push_screen(session, screen_selection(session.get("mode") or "show"))
+                await show_year_courses(query, context, year)
+            except ValueError:
+                pass
         return
 
     if data.startswith("course:"):
         await query.answer()
-        _, year_str, code = data.split(":", 2)
-        await select_course(query, context, int(year_str), code)
+        parts = data.split(":")
+        if len(parts) >= 3:
+            _, year_str, code = parts[0], parts, parts
+            try:
+                await select_course(query, context, int(year_str), code)
+            except ValueError:
+                pass
         return
 
     if data == "show_schedule":
