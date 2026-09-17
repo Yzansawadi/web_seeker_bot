@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+# -*-غ-8 -*-
 # -*- coding: utf-8 -*-
 """
 bot.py
 ------
 بوت تيليغرام لجدول مواد جامعة IUST (WEB SEEKER).
 
-رصد التغييرات المهمة فقط:
-- تغيير وقت المادة (الساعة/اليوم).
+رصد التغييرات المهمة فقط (مع تصحيح منطق Set-based لمنع التبديل الوهمي للجلسات المتطابقة):
+- تغيير وقت المادة أو يومها.
 - إضافة مواد جديدة.
 - حذف مواد من الجدول.
 إرسال التقرير كملف PDF مع تنبيه قصير والعودة التلقائية للقائمة الرئيسية.
@@ -195,7 +196,7 @@ def selected_courses_block(years_data, selected_list):
 
 
 # ---------------------------------------------------------------------------
-# رصد التغييرات المهمة فقط (الوقت/اليوم، الإضافات، الحذف)
+# رصد التغييرات المهمة (باستخدام Sets لمنع خلط الأوقات المتطابقة)
 # ---------------------------------------------------------------------------
 
 def compare_critical_changes(old_data, new_data):
@@ -225,35 +226,36 @@ def compare_critical_changes(old_data, new_data):
         if key not in new_courses:
             deletions.append(f"حذف مادة: **{old_c['name']}** (السنة {key[0]})")
 
-    # 3. مقارنة الأوقات/الأيام للمواد المشتركة
+    # 3. مقارنة الأوقات/الأيام للمواد المشتركة بمنطق Set-based دقيق
+    def extract_session_set(course_obj):
+        s_set = set()
+        for s in course_obj.get('sessions', []) or []:
+            act = str(s.get('activity') or "").strip()
+            day = str(s.get('day') or "").strip()
+            st = str(s.get('start') or "").strip()
+            en = str(s.get('end') or "").strip()
+            s_set.add((act, day, st, en))
+        return s_set
+
     for key, new_c in new_courses.items():
         if key in old_courses:
             old_c = old_courses[key]
             course_name = new_c['name']
             
-            old_dict = {f"{s.get('activity')}_{s.get('day')}_{s.get('start')}_{s.get('end')}": s for s in old_c.get('sessions', [])}
-            new_list = new_c.get('sessions', [])
-            
-            # مراجعة الجلسات الجديدة مقارنة بالقديمة للبحث عن اختلاف الوقت أو اليوم
-            for new_s in new_list:
-                act = new_s.get('activity')
-                day = new_s.get('day')
-                st = str(new_s.get('start') or "").strip()
-                en = str(new_s.get('end') or "").strip()
+            old_set = extract_session_set(old_c)
+            new_set = extract_session_set(new_c)
+
+            if old_set != new_set:
+                removed = old_set - new_set
+                added = new_set - old_set
                 
-                # ابحث هل نفس النشاط موجود بوقت/يوم مختلف أو هل طرا تعديل توقيت
-                matching_olds = [os for os in old_c.get('sessions', []) if os.get('activity') == act]
-                for old_s in matching_olds:
-                    o_day = old_s.get('day')
-                    o_st = str(old_s.get('start') or "").strip()
-                    o_en = str(old_s.get('end') or "").strip()
-                    
-                    if (o_day != day) or (o_st != st) or (o_en != en):
-                        # تم رصد تغيير في اليوم أو الوقت لهذه الجلسة
-                        time_changes.append(
-                            f"**{course_name}** ({act}): تغير من [يوم {o_day} | {o_st}-{o_en}] ⬅️ إلى [يوم {day} | {st}-{en}]"
-                        )
-                        break
+                details = []
+                for act, day, st, en in removed:
+                    details.append(f"إلغاء/تعديل جلسة قديمة: [{act} - {day} | {st}-{en}]")
+                for act, day, st, en in added:
+                    details.append(f"إضافة/تعديل جلسة جديدة: [{act} - {day} | {st}-{en}]")
+                
+                time_changes.append(f"**{course_name}**:\n  " + "\n  ".join(details))
 
     report_lines = []
     if additions:
@@ -267,12 +269,11 @@ def compare_critical_changes(old_data, new_data):
         report_lines.append("")
         
     if time_changes:
-        report_lines.append("⏱️ التعديلات في أوقات أو أيام المحاضرات:")
+        report_lines.append("⏱️ التعديلات في أوقات أو أيام المحاضرات والجلسات:")
         for item in time_changes: report_lines.append(f"  • {item}")
         report_lines.append("")
 
-    has_any = bool(report_lines)
-    if has_any:
+    if report_lines:
         return "\n".join(report_lines)
     return None
 
@@ -589,7 +590,7 @@ async def run_update_schedule(query, context):
             
             if report_text:
                 short_msg = (
-                    "⚠️ **رصد تغييرات مهمة (أوقات/إضافات/حذف) في الجدول!**\n"
+                    "⚠️ **رصد تغييرات مهمة حقيقية (أوقات/إضافات/حذف) في الجدول!**\n"
                     "📄 التفاصيل الكاملة مدرجة في ملف الـ PDF أدناه."
                 )
                 await context.bot.send_message(chat_id=query.message.chat_id, text=short_msg, parse_mode='Markdown')
@@ -621,7 +622,7 @@ async def run_update_schedule(query, context):
             else:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id, 
-                    text="✅ تم التحديث بنجاح، ولم يتم رصد أي تعديل في أوقات المواد أو إضافات/حذف."
+                    text="✅ تم التحديث بنجاح، ولم يتم رصد أي تبديل حقيقي في أوقات أو أيام المواد أو إضافات/حذف."
                 )
     elif had_data_before:
         note = "لم يكتمل التحديث بنجاح. سيتم الاستمرار بالبيانات القديمة.\n\n"
