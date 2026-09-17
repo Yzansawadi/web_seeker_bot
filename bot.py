@@ -1,16 +1,47 @@
 #!/usr/bin/env python3
-# -*-غ-8 -*-
 # -*- coding: utf-8 -*-
 """
 bot.py
 ------
-بوت تيليغرام لجدول مواد جامعة IUST (WEB SEEKER).
+بوت تيليغرام لجدول مواد جامعة IUST.
 
-رصد التغييرات المهمة فقط (مع تصحيح منطق Set-based لمنع التبديل الوهمي للجلسات المتطابقة):
-- تغيير وقت المادة أو يومها.
-- إضافة مواد جديدة.
-- حذف مواد من الجدول.
-إرسال التقرير كملف PDF مع تنبيه قصير والعودة التلقائية للقائمة الرئيسية.
+نظام التنقّل (مُعاد بناؤه بالكامل):
+------------------------------------
+بدل تمرير "إلى أين نعود" يدويًا كنص خاص بكل زر (كما كان سابقًا)، يحمل كل
+مستخدم الآن "مكدّس شاشات" (session["stack"]): في كل مرة يدخل المستخدم
+شاشة أعمق (سنة، قائمة حذف...)، تُحفَظ الشاشة التي كان فيها في أعلى
+المكدّس. زر "رجوع" يسحب دائمًا آخر عنصر من المكدّس ويعرضه من جديد --
+هذا يعمل بشكل صحيح ومنطقي بغض النظر عن المسار الذي سلكه المستخدم للوصول
+إلى هنا (بدل كتابة حالة خاصة لكل تركيبة ممكنة من الشاشات).
+
+بالإضافة لزر "رجوع" (خطوة واحدة للخلف)، يوجد الآن في كل شاشة (عدا
+الرئيسية) زر "القائمة الرئيسية" يعيد المستخدم فورًا لشاشة البداية
+بضغطة واحدة، دون أن يفقد أي مادة اختارها (لا يُصفَّر شيء عند الضغط
+عليه -- التصفير يحدث فقط في مكانيه الأصليين: عرض الجدول، وتوليد الجدول
+المثالي، تمامًا كما كان مصمّمًا سابقًا).
+
+هيكلة الشاشات:
+1) الشاشة الرئيسية (start): تظهر عند /start. 3 أزرار: تحديث الجدول،
+   توليد أفضل جدول، عرض أوقات المواد فقط. هذه هي "جذر" التنقّل.
+2) شاشة الاختيار (selection): تظهر بعد اختيار أحد المسارين. تحتوي قائمة
+   السنوات، وصندوق المواد المختارة، وزر إنهاء المسار (عرض/توليد الجدول)
+   وزر حذف مادة إن وُجد اختيار، وزري رجوع/القائمة الرئيسية.
+3) شاشة مواد سنة (year): قائمة مواد سنة معيّنة مع علامة ✓ لما سبق
+   اختياره، وأزرار رجوع/القائمة الرئيسية/حذف مادة.
+4) شاشة حذف مادة (delete): قائمة بكل المواد المختارة حاليًا، الضغط على
+   أي منها يحذفها فورًا ويعيد المستخدم لنفس الشاشة التي جاء منها (تمامًا
+   كما لو ضغط "رجوع").
+
+ملاحظة أداء: تُحمَّل بيانات subjects.xlsx و IUST_schedule_full.xlsx مرة
+واحدة وتُخزَّن في الذاكرة (انظر schedule_data.load_courses)، ولا تُعاد
+قراءتها من القرص إلا إذا تغيّر أحد الملفين فعليًا.
+
+التشغيل محليًا (Polling):
+    pip install -r requirements.txt
+    python3 bot.py
+
+التشغيل على استضافة سحابية (Webhook):
+    راجع ملف DEPLOY_AR.md.
 """
 
 import os
@@ -82,7 +113,16 @@ YEAR_NAMES = {
     5: "السنة الخامسة",
 }
 
+# ---------------------------------------------------------------------------
+# حالة كل مستخدم (في الذاكرة فقط، تُفقد عند إعادة تشغيل البوت)
+# ---------------------------------------------------------------------------
+# user_id -> {
+#     "selected": [ (year, code), ... ],   # المواد المختارة بترتيب اختيارها
+#     "mode": "show" | "optimize" | None,
+#     "stack": [ screen_descriptor, ... ], # مكدّس شاشات التنقّل (انظر أعلى الملف)
+# }
 user_sessions = {}
+
 seen_users = set()
 _bot_start_time = datetime.now(timezone.utc)
 
@@ -92,7 +132,8 @@ def track_user(user):
     seen_users.add(user.id)
     if is_new:
         name = user.full_name or user.username or str(user.id)
-        logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s)", name, user.id)
+        logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين منذ آخر تشغيل: %s",
+                    name, user.id, len(seen_users))
         asyncio.create_task(
             asyncio.to_thread(notifier.register_new_user, user.id, user.username)
         )
@@ -109,6 +150,10 @@ def reset_session(user_id):
     user_sessions[user_id] = {"selected": [], "mode": None, "stack": []}
     return user_sessions[user_id]
 
+
+# ---------------------------------------------------------------------------
+# مكدّس التنقّل: كل شاشة تُمثَّل بـ tuple بسيط (نوع الشاشة, معطياتها إن وُجدت)
+# ---------------------------------------------------------------------------
 
 SCREEN_START = ("start",)
 
@@ -133,38 +178,46 @@ def pop_screen(session):
 
 
 async def render_screen(query, context, user_id, descriptor):
+    """يرسم أي شاشة بناءً على وصفها (تُستخدم عند الرجوع أو القفز للرئيسية)."""
     session = get_session(user_id)
-    kind = descriptor[0] if isinstance(descriptor, tuple) else "start"
+    kind = descriptor[0]
 
     if kind == "selection":
         years_data = sd.load_courses()
-        mode = descriptor if len(descriptor) > 1 else None
+        mode = descriptor[1]
         session["mode"] = mode
         text, keyboard = selection_text_and_keyboard(years_data, mode, session["selected"])
         await query.edit_message_text(text, reply_markup=keyboard)
         return
 
     if kind == "year":
-        year_val = descriptor if len(descriptor) > 1 else 1
-        await show_year_courses(query, context, year_val)
+        await show_year_courses(query, context, descriptor[1])
         return
 
+    # الافتراضي: الشاشة الرئيسية
     text, keyboard = start_text_and_keyboard()
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
 async def go_back(query, context, user_id):
+    """يسحب آخر شاشة من المكدّس ويعرضها -- هذا هو منطق زر 'رجوع' الموحّد."""
     session = get_session(user_id)
     descriptor = pop_screen(session)
     await render_screen(query, context, user_id, descriptor)
 
 
 async def go_start(query, context, user_id):
+    """يصفّر مكدّس التنقّل ويعيد المستخدم للشاشة الرئيسية مباشرة، دون أي
+    تأثير على المواد المختارة (زر 'القائمة الرئيسية')."""
     session = get_session(user_id)
     session["stack"] = []
     text, keyboard = start_text_and_keyboard()
     await query.edit_message_text(text, reply_markup=keyboard)
 
+
+# ---------------------------------------------------------------------------
+# أدوات مساعدة
+# ---------------------------------------------------------------------------
 
 def schedule_file_exists():
     return os.path.exists(sd.SCHEDULE_PATH)
@@ -196,116 +249,12 @@ def selected_courses_block(years_data, selected_list):
 
 
 # ---------------------------------------------------------------------------
-# رصد التغييرات المهمة (باستخدام Sets لمنع خلط الأوقات المتطابقة)
-# ---------------------------------------------------------------------------
-
-def compare_critical_changes(old_data, new_data):
-    time_changes = []
-    additions = []
-    deletions = []
-    
-    old_courses = {}
-    if old_data:
-        for y in sd.get_years(old_data):
-            for c in sd.get_courses_for_year(old_data, y):
-                old_courses[(y, c['code'])] = c
-                
-    new_courses = {}
-    if new_data:
-        for y in sd.get_years(new_data):
-            for c in sd.get_courses_for_year(new_data, y):
-                new_courses[(y, c['code'])] = c
-
-    # 1. إضافات مواد كاملة
-    for key, new_c in new_courses.items():
-        if key not in old_courses:
-            additions.append(f"إضافة مادة: **{new_c['name']}** (السنة {key[0]})")
-
-    # 2. حذف مواد كاملة
-    for key, old_c in old_courses.items():
-        if key not in new_courses:
-            deletions.append(f"حذف مادة: **{old_c['name']}** (السنة {key[0]})")
-
-    # 3. مقارنة الأوقات/الأيام للمواد المشتركة بمنطق Set-based دقيق
-    def extract_session_set(course_obj):
-        s_set = set()
-        for s in course_obj.get('sessions', []) or []:
-            act = str(s.get('activity') or "").strip()
-            day = str(s.get('day') or "").strip()
-            st = str(s.get('start') or "").strip()
-            en = str(s.get('end') or "").strip()
-            s_set.add((act, day, st, en))
-        return s_set
-
-    for key, new_c in new_courses.items():
-        if key in old_courses:
-            old_c = old_courses[key]
-            course_name = new_c['name']
-            
-            old_set = extract_session_set(old_c)
-            new_set = extract_session_set(new_c)
-
-            if old_set != new_set:
-                removed = old_set - new_set
-                added = new_set - old_set
-                
-                details = []
-                for act, day, st, en in removed:
-                    details.append(f"إلغاء/تعديل جلسة قديمة: [{act} - {day} | {st}-{en}]")
-                for act, day, st, en in added:
-                    details.append(f"إضافة/تعديل جلسة جديدة: [{act} - {day} | {st}-{en}]")
-                
-                time_changes.append(f"**{course_name}**:\n  " + "\n  ".join(details))
-
-    report_lines = []
-    if additions:
-        report_lines.append("🆕 المواد المضافة:")
-        for item in additions: report_lines.append(f"  • {item}")
-        report_lines.append("")
-        
-    if deletions:
-        report_lines.append("❌ المواد المحذوفة:")
-        for item in deletions: report_lines.append(f"  • {item}")
-        report_lines.append("")
-        
-    if time_changes:
-        report_lines.append("⏱️ التعديلات في أوقات أو أيام المحاضرات والجلسات:")
-        for item in time_changes: report_lines.append(f"  • {item}")
-        report_lines.append("")
-
-    if report_lines:
-        return "\n".join(report_lines)
-    return None
-
-
-def create_critical_html(report_text):
-    safe_body = report_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
-    html = f"""
-    <html dir="rtl" lang="ar">
-    <head>
-        <meta charset="utf-8">
-        <style>
-            body {{ font-family: Tahoma, sans-serif; padding: 25px; line-height: 1.8; color: #333; background: #fdfdfd; font-size: 13px; }}
-            h1 {{ color: #2c3e50; text-align: center; border-bottom: 3px solid #3498db; padding-bottom: 12px; }}
-            .content {{ background: #fff; padding: 15px 20px; margin-bottom: 15px; border-radius: 8px; border-right: 5px solid #3498db; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-        </style>
-    </head>
-    <body>
-        <h1>تقرير التغييرات المهمة في الجدول (WEB SEEKER)</h1>
-        <div class="content">
-            {safe_body}
-        </div>
-    </body>
-    </html>
-    """
-    return html
-
-
-# ---------------------------------------------------------------------------
 # بناء لوحات الأزرار
 # ---------------------------------------------------------------------------
 
 def nav_row():
+    """صف أزرار التنقّل الموحَّد: رجوع خطوة واحدة + قفز للرئيسية مباشرة.
+    يظهر في كل شاشة عدا الشاشة الرئيسية نفسها."""
     return [
         InlineKeyboardButton("رجوع", callback_data="back"),
         InlineKeyboardButton("القائمة الرئيسية", callback_data="go_start"),
@@ -313,6 +262,7 @@ def nav_row():
 
 
 def build_start_keyboard():
+    """شاشة البداية (جذر التنقّل): زر التحديث + زرَي المسارين، بلا زر رجوع."""
     rows = []
     remaining = cooldown_remaining_seconds()
     if remaining <= 0:
@@ -327,23 +277,34 @@ def build_start_keyboard():
 
 
 def build_selection_keyboard(years_data, mode, has_selection):
+    """
+    شاشة الاختيار (السنوات + الأزرار الإضافية).
+
+    mode="show"  + لا اختيار: يظهر زر "إرسال أوقات جميع المواد PDF"
+    mode="show"  + يوجد اختيار: "عرض الجدول" + "حذف مادة"
+    mode="optimize" + يوجد اختيار: "توليد الجدول" + "حذف مادة"
+    """
     rows = []
+
     if mode == "show" and not has_selection:
         rows.append([InlineKeyboardButton(
             "إرسال أوقات جميع المواد (PDF)", callback_data="send_all_times_pdf"
         )])
+
     year_buttons = []
     for y in sd.get_years(years_data):
         label = YEAR_NAMES.get(y, f"السنة {y}")
         year_buttons.append(InlineKeyboardButton(label, callback_data=f"year:{y}"))
     for i in range(0, len(year_buttons), 2):
         rows.append(year_buttons[i:i + 2])
+
     if has_selection:
         if mode == "show":
             rows.append([InlineKeyboardButton("عرض الجدول", callback_data="show_schedule")])
         elif mode == "optimize":
             rows.append([InlineKeyboardButton("توليد الجدول المثالي", callback_data="optimize_schedule")])
         rows.append([InlineKeyboardButton("حذف مادة", callback_data="delete_menu:home")])
+
     rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
@@ -354,6 +315,7 @@ def build_delete_keyboard(years_data, selected_list):
         course = sd.get_course(years_data, year, code)
         name = course["name"] if course else code
         rows.append([InlineKeyboardButton(name, callback_data=f"delete_course:{year}:{code}")])
+
     rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
@@ -365,8 +327,10 @@ def build_year_courses_keyboard(years_data, year, selected_codes, has_selection)
         mark = "✓ " if c["code"] in selected_codes else ""
         label = f"{mark}{c['name']}"
         rows.append([InlineKeyboardButton(label, callback_data=f"course:{year}:{c['code']}")])
+
     if has_selection:
         rows.append([InlineKeyboardButton("حذف مادة", callback_data=f"delete_menu:year-{year}")])
+
     rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
@@ -375,9 +339,28 @@ def build_year_courses_keyboard(years_data, year, selected_codes, has_selection)
 # أدوات تنسيق النصوص
 # ---------------------------------------------------------------------------
 
+def format_course_info(course):
+    lines = [f"{course['name']}", f"الرمز: {course['code']}", ""]
+
+    if not course["sessions"]:
+        lines.append("لا تتوفر معلومات جدول لهذه المادة حتى الآن.")
+        return "\n".join(lines)
+
+    for s in course["sessions"]:
+        room = f" | القاعة: {s['room']}" if s["room"] else ""
+        teacher = f" | {s['teacher']}" if s["teacher"] else ""
+        lines.append(
+            f"- {s['day']} — {s['activity']}\n"
+            f"   {s['start']} – {s['end']}{room}{teacher}"
+        )
+
+    return "\n".join(lines)
+
+
 def build_full_schedule_text(years_data, selected_list):
     if not selected_list:
         return "لم تقم باختيار أي مادة حتى الآن."
+
     all_sessions = []
     for year, code in selected_list:
         course = sd.get_course(years_data, year, code)
@@ -385,12 +368,16 @@ def build_full_schedule_text(years_data, selected_list):
             continue
         for s in course["sessions"]:
             all_sessions.append((s["day"], s["start_min"], course["name"], s))
+
     if not all_sessions:
         return "لا تتوفر معلومات جدول للمواد التي اخترتها."
+
     by_day = {}
     for day, start_min, name, s in all_sessions:
         by_day.setdefault(day, []).append((start_min, name, s))
+
     ordered_days = [d for d in sd.DAY_ORDER if d in by_day]
+
     lines = ["جدولك الأسبوعي\n"]
     for day in ordered_days:
         lines.append(f"\n{day}")
@@ -402,8 +389,13 @@ def build_full_schedule_text(years_data, selected_list):
                 f"  {s['start']} – {s['end']}  —  {name}\n"
                 f"      {s['activity']}{room}{teacher}"
             )
+
     return "\n".join(lines)
 
+
+# ---------------------------------------------------------------------------
+# بناء نص ولوحة الشاشة الرئيسية / شاشة الاختيار
+# ---------------------------------------------------------------------------
 
 def start_text_and_keyboard(intro_note=""):
     text = intro_note or "اختر ما تريد القيام به:"
@@ -414,6 +406,7 @@ def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
     has_selection = len(selected_list) > 0
     text = intro_note
     text += selected_courses_block(years_data, selected_list)
+
     if not schedule_file_exists():
         text += "لم يتم جلب بيانات الجدول حتى الآن. اضغط 'القائمة الرئيسية' ثم 'تحديث أوقات الجدول'."
     else:
@@ -421,6 +414,7 @@ def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
             text += "اختر المواد التي تريد توليد جدول منها"
         else:
             text += "اختر المواد التي تريد عرض أوقاتها."
+
     keyboard = build_selection_keyboard(years_data, mode, has_selection)
     return text, keyboard
 
@@ -433,7 +427,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     track_user(update.effective_user)
     reset_session(user_id)
-    text, keyboard = start_text_and_keyboard(intro_note=" اهلا بك في بوت WEB SEEKER. \n\n")
+    text, keyboard = start_text_and_keyboard(intro_note=" اهلا بك في بوت websseker. \n\n")
     await update.message.reply_text(text, reply_markup=keyboard)
 
 
@@ -441,7 +435,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now(timezone.utc) - _bot_start_time
     hours, remainder = divmod(int(uptime.total_seconds()), 3600)
     minutes, _ = divmod(remainder, 60)
+
     active_sessions = sum(1 for s in user_sessions.values() if s["selected"])
+
     text = (
         "إحصائيات البوت (منذ آخر تشغيل):\n\n"
         f"عدد المستخدمين الفريدين: {len(seen_users)}\n"
@@ -456,8 +452,10 @@ async def show_year_courses(query, context, year):
     user_id = query.from_user.id
     session = get_session(user_id)
     years_data = sd.load_courses()
+
     selected_codes = {code for (y, code) in session["selected"] if y == year}
     has_selection = len(session["selected"]) > 0
+
     year_label = YEAR_NAMES.get(year, f"السنة {year}")
     text = f"مواد {year_label}\n\nاختر مادة:"
     await query.edit_message_text(
@@ -471,11 +469,16 @@ async def select_course(query, context, year, code):
     session = get_session(user_id)
     years_data = sd.load_courses()
     course = sd.get_course(years_data, year, code)
+
     if course is None:
         await query.edit_message_text("هذه المادة غير موجودة، قد تكون البيانات تغيّرت بعد آخر تحديث.")
         return
+
     if (year, code) not in session["selected"]:
         session["selected"].append((year, code))
+
+    # اختيار مادة من شاشة السنة يعيدنا مباشرة لشاشة الاختيار التي جئنا
+    # منها -- وهذا تمامًا سلوك زر "رجوع"، فنعيد استخدامه.
     await go_back(query, context, user_id)
 
 
@@ -483,9 +486,11 @@ async def show_delete_menu(query, context):
     user_id = query.from_user.id
     session = get_session(user_id)
     years_data = sd.load_courses()
+
     if not session["selected"]:
         await go_back(query, context, user_id)
         return
+
     text = "اختر المادة التي تريد حذفها من قائمة اختياراتك، أو اضغط رجوع للعودة بدون حذف:"
     keyboard = build_delete_keyboard(years_data, session["selected"])
     await query.edit_message_text(text, reply_markup=keyboard)
@@ -497,6 +502,7 @@ async def delete_course(query, context, year, code):
     session["selected"] = [
         (y, c) for (y, c) in session["selected"] if not (y == year and c == code)
     ]
+    # الحذف يعيد المستخدم لنفس الشاشة التي جاء منها -- سلوك "رجوع" نفسه.
     await go_back(query, context, user_id)
 
 
@@ -504,9 +510,11 @@ async def show_schedule(query, context):
     user_id = query.from_user.id
     session = get_session(user_id)
     years_data = sd.load_courses()
+
     selected_snapshot = list(session["selected"])
     text = build_full_schedule_text(years_data, selected_snapshot)
     await query.edit_message_text(text)
+
     if selected_snapshot:
         os.makedirs(TEMP_DIR, exist_ok=True)
         pdf_path = os.path.join(TEMP_DIR, f"schedule_{user_id}.pdf")
@@ -520,12 +528,17 @@ async def show_schedule(query, context):
                 )
         except Exception:
             logger.exception("فشل إنشاء أو إرسال ملف PDF للجدول")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="تعذّر إنشاء ملف PDF للجدول، لكن الجدول النصي أعلاه يحتوي على كل المعلومات.",
+            )
         finally:
             if os.path.exists(pdf_path):
                 try:
                     os.remove(pdf_path)
                 except OSError:
                     pass
+
     reset_session(user_id)
     start_text, start_kb = start_text_and_keyboard()
     await context.bot.send_message(
@@ -543,8 +556,6 @@ async def run_update_schedule(query, context):
 
     user_id = query.from_user.id
     had_data_before = schedule_file_exists()
-    
-    old_years_data = sd.load_courses() if had_data_before else None
 
     await query.answer("بدأ التحديث، قد يستغرق هذا دقيقة...")
     await query.edit_message_text("جاري جلب أحدث الأوقات من موقع الجامعة...\nيرجى الانتظار.")
@@ -571,84 +582,104 @@ async def run_update_schedule(query, context):
     except subprocess.TimeoutExpired:
         success = False
         error_snippet = f"انتهت المهلة بعد {EXTRACT_SCRIPT_TIMEOUT_SECONDS} ثانية."
-    except Exception as exc:
+        logger.error("انتهت مهلة extract_schedule.py بعد %s ثانية", EXTRACT_SCRIPT_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001
         success = False
         error_snippet = str(exc)[-300:]
+        logger.exception("خطأ غير متوقع أثناء تشغيل extract_schedule.py")
 
     _last_update_ts["value"] = time.time()
-    
     sd.load_courses(force_reload=True)
-    new_years_data = sd.load_courses()
-    
     asyncio.create_task(asyncio.to_thread(notifier.notify_update_result, success, error_snippet))
 
     if success:
         note = "تم تحديث الجدول بنجاح بأحدث البيانات من موقع الجامعة.\n\n"
-        
-        if old_years_data and new_years_data:
-            report_text = compare_critical_changes(old_years_data, new_years_data)
-            
-            if report_text:
-                short_msg = (
-                    "⚠️ **رصد تغييرات مهمة حقيقية (أوقات/إضافات/حذف) في الجدول!**\n"
-                    "📄 التفاصيل الكاملة مدرجة في ملف الـ PDF أدناه."
-                )
-                await context.bot.send_message(chat_id=query.message.chat_id, text=short_msg, parse_mode='Markdown')
-                
-                os.makedirs(TEMP_DIR, exist_ok=True)
-                changes_pdf_path = os.path.join(TEMP_DIR, f"WEB_SEEKER_critical_updates_{user_id}.pdf")
-                try:
-                    from weasyprint import HTML
-                    html_content = create_critical_html(report_text)
-                    HTML(string=html_content).write_pdf(changes_pdf_path)
-                    
-                    with open(changes_pdf_path, "rb") as f:
-                        await context.bot.send_document(
-                            chat_id=query.message.chat_id,
-                            document=f,
-                            filename="WEB_SEEKER_critical_updates.pdf",
-                            caption="📄 تقرير التغييرات المهمة"
-                        )
-                except ImportError:
-                    logger.warning("مكتبة weasyprint غير مثبتة.")
-                except Exception as e:
-                    logger.error(f"خطأ PDF: {e}")
-                finally:
-                    if os.path.exists(changes_pdf_path):
-                        try:
-                            os.remove(changes_pdf_path)
-                        except OSError:
-                            pass
-            else:
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id, 
-                    text="✅ تم التحديث بنجاح، ولم يتم رصد أي تبديل حقيقي في أوقات أو أيام المواد أو إضافات/حذف."
-                )
     elif had_data_before:
-        note = "لم يكتمل التحديث بنجاح. سيتم الاستمرار بالبيانات القديمة.\n\n"
+        note = "لم يكتمل التحديث بنجاح. سيتم الاستمرار باستخدام البيانات من آخر تحديث ناجح.\n\n"
     else:
-        note = "فشل التحديث ولا توجد بيانات متاحة.\n"
+        note = (
+            "فشل التحديث ولا توجد بيانات جدول متاحة حتى الآن.\n"
+            "هذا يعني عادة أن السكربت لم يتمكن من الوصول إلى موقع الجامعة، "
+            "أو أن بنية الموقع قد تغيّرت.\n"
+        )
         if error_snippet:
             note += f"تفاصيل: {error_snippet}\n"
         note += "\n"
 
     reset_session(user_id)
-    
-    # العودة الفورية للقائمة الرئيسية
     start_text, start_kb = start_text_and_keyboard(intro_note=note)
-    try:
-        await query.edit_message_text(start_text, reply_markup=start_kb)
-    except Exception:
-        await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
+    await query.edit_message_text(start_text, reply_markup=start_kb)
+
+
+def build_optimized_text(result):
+    if result["timed_out"] and not result["schedules"]:
+        return (
+            "انتهى وقت المعالجة قبل إيجاد جدول مثالي.\n"
+            "جرّب اختيار عدد أقل من المواد للحصول على نتيجة أسرع."
+        )
+
+    if not result["schedules"]:
+        no_data = result.get("no_data_courses", [])
+        if no_data:
+            return (
+                "لا توجد معلومات جدول كافية لإنشاء جدول مثالي.\n"
+                "المواد التالية بدون معلومات أوقات: " + "، ".join(no_data)
+            )
+        return "لم يتمكن النظام من إيجاد أي جدول ممكن للمواد المختارة."
+
+    best = result["schedules"][0]
+    lines = ["الجدول المثالي المقترح\n"]
+
+    lines.append(f"عدد أيام الحضور: {best['days_count']}")
+    if best["total_gap_minutes"] == 0:
+        lines.append("لا توجد فراغات بين المحاضرات في أي يوم")
+    else:
+        lines.append(f"مجموع الفراغات بين المحاضرات: {best['total_gap_minutes']} دقيقة")
+
+    if result["excluded_courses"]:
+        lines.append("")
+        lines.append("مواد مستثناة بسبب تعارض حتمي:")
+        for e in result["excluded_courses"]:
+            lines.append(f"  • {e['name']}")
+        lines.append("(لا توجد أي تركيبة أوقات تسمح بدمجها مع بقية مواداتك)")
+
+    if result.get("no_data_courses"):
+        lines.append("")
+        lines.append("مواد بدون معلومات أوقات (لم تُدرَج في الجدول):")
+        for name in result["no_data_courses"]:
+            lines.append(f"  • {name}")
+
+    by_day = {}
+    for o in best["options"]:
+        for s in o.sessions:
+            by_day.setdefault(s["day"], []).append((s["start_min"], o.course_name, o.activity, s))
+
+    ordered_days = [d for d in sd.DAY_ORDER if d in by_day]
+    if ordered_days:
+        lines.append("")
+    for day in ordered_days:
+        lines.append(f"\n{day}")
+        for _, name, activity, s in sorted(by_day[day], key=lambda x: x[0]):
+            room = f" | القاعة: {s['room']}" if s.get("room") else ""
+            teacher = f" | {s['teacher']}" if s.get("teacher") else ""
+            lines.append(f"  {s['start']} – {s['end']}  —  {name}")
+            lines.append(f"      {activity}{room}{teacher}")
+
+    return "\n".join(lines)
 
 
 async def send_all_times_pdf(query, context):
+    """يبني ويرسل PDF بأوقات جميع المواد من كل السنوات، ثم يعيد عرض نفس
+    شاشة الاختيار الحالية (لا يعتبر هذا تنقّلاً لشاشة جديدة، فلا يغيّر
+    مكدّس التنقّل)."""
     await query.answer()
-    await query.edit_message_text("جاري تجميع أوقات جميع المواد في ملف PDF...")
+    await query.edit_message_text("جاري تجميع أوقات جميع المواد في ملف PDF...\nقد يستغرق هذا لحظة.")
+
     years_data = sd.load_courses()
     user_id = query.from_user.id
     os.makedirs(TEMP_DIR, exist_ok=True)
     pdf_path = os.path.join(TEMP_DIR, f"all_times_{user_id}.pdf")
+
     try:
         await asyncio.to_thread(pdf_export.build_all_times_pdf, years_data, pdf_path)
         with open(pdf_path, "rb") as f:
@@ -659,13 +690,18 @@ async def send_all_times_pdf(query, context):
                 caption="أوقات جميع المواد الدراسية",
             )
     except Exception:
-        logger.exception("خطأ PDF جميع الأوقات")
+        logger.exception("فشل إنشاء أو إرسال PDF جميع الأوقات")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="تعذّر إنشاء الملف. تأكد من أن بيانات الجدول محدّثة (اضغط تحديث أوقات الجدول).",
+        )
     finally:
         if os.path.exists(pdf_path):
             try:
                 os.remove(pdf_path)
             except OSError:
                 pass
+
     session = get_session(user_id)
     text, keyboard = selection_text_and_keyboard(years_data, session.get("mode", "show"), session["selected"])
     await context.bot.send_message(
@@ -673,40 +709,23 @@ async def send_all_times_pdf(query, context):
     )
 
 
-def build_optimized_text(result):
-    if result["timed_out"] and not result["schedules"]:
-        return "انتهى وقت المعالجة."
-    if not result["schedules"]:
-        no_data = result.get("no_data_courses", [])
-        if no_data:
-            return "مواد بدون أوقات: " + "، ".join(no_data)
-        return "لم يتم إيجاد جدول ممكن."
-    best = result["schedules"][0]
-    lines = ["الجدول المثالي المقترح\n"]
-    lines.append(f"عدد أيام الحضور: {best['days_count']}")
-    lines.append(f"مجموع الفراغات: {best['total_gap_minutes']} دقيقة")
-    by_day = {}
-    for o in best["options"]:
-        for s in o.sessions:
-            by_day.setdefault(s["day"], []).append((s["start_min"], o.course_name, o.activity, s))
-    ordered_days = [d for d in sd.DAY_ORDER if d in by_day]
-    for day in ordered_days:
-        lines.append(f"\n{day}")
-        for _, name, activity, s in sorted(by_day[day], key=lambda x: x[0]):
-            lines.append(f"  {s['start']} – {s['end']}  —  {name} ({activity})")
-    return "\n".join(lines)
-
-
 async def optimize_schedule(query, context):
     user_id = query.from_user.id
     session = get_session(user_id)
     years_data = sd.load_courses()
+
     if not session["selected"]:
         await query.answer("لا توجد مواد مختارة.", show_alert=True)
         return
+
     await query.answer()
-    await query.edit_message_text("جاري تحليل الجدول المثالي...")
+    await query.edit_message_text(
+        "جاري تحليل الجدول المثالي...\n"
+        "قد يستغرق هذا بضع ثوانٍ حسب عدد المواد المختارة."
+    )
+
     selected_snapshot = list(session["selected"])
+
     try:
         result = await asyncio.to_thread(
             opt.find_best_schedules,
@@ -715,35 +734,45 @@ async def optimize_schedule(query, context):
             top_n=1, time_budget_seconds=8.0,
         )
     except Exception:
-        logger.exception("خطأ تحسين")
+        logger.exception("خطأ في محرك التحسين")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="حدث خطأ غير متوقع أثناء توليد الجدول. حاول مجددًا أو اختر مواد مختلفة.",
+        )
         reset_session(user_id)
         start_text, start_kb = start_text_and_keyboard()
         await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
         return
+
     result_text = build_optimized_text(result)
     await context.bot.send_message(chat_id=query.message.chat_id, text=result_text)
+
     if result["schedules"]:
         best = result["schedules"][0]
         os.makedirs(TEMP_DIR, exist_ok=True)
         pdf_path = os.path.join(TEMP_DIR, f"optimal_{user_id}.pdf")
         try:
-            stats_lines = [f"أيام: {best['days_count']} | فراغات: {best['total_gap_minutes']}د"]
+            stats_lines = [f"عدد أيام الحضور: {best['days_count']}  |  مجموع الفراغات: {best['total_gap_minutes']} دقيقة"]
+            if result["excluded_courses"]:
+                excl = "، ".join(e["name"] for e in result["excluded_courses"])
+                stats_lines.append(f"مواد مستثناة: {excl}")
             pdf_export.build_optimized_schedule_pdf(best["options"], pdf_path, stats_lines=stats_lines)
             with open(pdf_path, "rb") as f:
                 await context.bot.send_document(
                     chat_id=query.message.chat_id,
                     document=f,
                     filename="webseeker_schedule.pdf",
-                    caption="الجدول المثالي PDF",
+                    caption="الجدول المثالي بصيغة PDF",
                 )
         except Exception:
-            pass
+            logger.exception("فشل إنشاء أو إرسال PDF الجدول المثالي")
         finally:
             if os.path.exists(pdf_path):
                 try:
                     os.remove(pdf_path)
                 except OSError:
                     pass
+
     reset_session(user_id)
     start_text, start_kb = start_text_and_keyboard()
     await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
@@ -753,12 +782,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     track_user(query.from_user)
+    logger.info("ضغطة زر من المستخدم %s: %s", query.from_user.id, data)
+
     user_id = query.from_user.id
+    username = query.from_user.username
     session = get_session(user_id)
+
+    def _fire_log_event(event_type, value=""):
+        asyncio.create_task(asyncio.to_thread(notifier.log_event, user_id, username, event_type, value))
+
+    if data == "back" or data == "go_start":
+        _fire_log_event("back_button")
+    elif data.startswith("year:"):
+        _fire_log_event("select_year", data.split(":", 1)[1])
+    elif data.startswith("course:"):
+        _, year_str, code = data.split(":", 2)
+        years_data_for_log = sd.load_courses()
+        course_for_log = sd.get_course(years_data_for_log, int(year_str), code)
+        course_name = course_for_log["name"] if course_for_log else code
+        _fire_log_event("select_subject", course_name)
+    elif data.startswith("delete_course:"):
+        _fire_log_event("delete_subject")
+    elif data == "show_schedule":
+        _fire_log_event("show_schedule")
 
     if data == "update_cooldown":
         remaining = cooldown_remaining_seconds()
-        await query.answer(f"التحديث متاح بعد {format_remaining(remaining)}.", show_alert=True)
+        await query.answer(
+            f"تم استخدام التحديث مؤخرًا. حاول مرة أخرى بعد {format_remaining(remaining)}.",
+            show_alert=True,
+        )
         return
 
     if data == "update_schedule":
@@ -766,8 +819,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("mode:"):
+        # اختيار المسار من الشاشة الرئيسية: نحفظ الرئيسية في المكدّس قبل
+        # الانتقال، حتى يعمل "رجوع" من شاشة الاختيار بشكل صحيح.
         await query.answer()
-        chosen_mode = data.split(":", 1) if ":" in data else "show"
+        chosen_mode = data.split(":", 1)[1]
         push_screen(session, SCREEN_START)
         session["mode"] = chosen_mode
         years_data = sd.load_courses()
@@ -791,13 +846,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("delete_menu:"):
         await query.answer()
-        origin = data.split(":", 1) if ":" in data else "home"
+        origin = data.split(":", 1)[1]  # "home" أو "year-<رقم السنة>"
         if origin.startswith("year-"):
-            try:
-                y_val = int(origin.split("-", 1))
-            except ValueError:
-                y_val = 1
-            push_screen(session, screen_year(y_val))
+            push_screen(session, screen_year(int(origin.split("-", 1)[1])))
         else:
             push_screen(session, screen_selection(session.get("mode") or "show"))
         await show_delete_menu(query, context)
@@ -805,34 +856,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("delete_course:"):
         await query.answer()
-        parts = data.split(":")
-        if len(parts) >= 3:
-            try:
-                await delete_course(query, context, int(parts), parts)
-            except ValueError:
-                pass
+        _, year_str, code = data.split(":", 2)
+        await delete_course(query, context, int(year_str), code)
         return
 
     if data.startswith("year:"):
         await query.answer()
-        parts = data.split(":")
-        if len(parts) >= 2:
-            try:
-                year = int(parts)
-                push_screen(session, screen_selection(session.get("mode") or "show"))
-                await show_year_courses(query, context, year)
-            except ValueError:
-                pass
+        year = int(data.split(":")[1])
+        push_screen(session, screen_selection(session.get("mode") or "show"))
+        await show_year_courses(query, context, year)
         return
 
     if data.startswith("course:"):
         await query.answer()
-        parts = data.split(":")
-        if len(parts) >= 3:
-            try:
-                await select_course(query, context, int(parts), parts)
-            except ValueError:
-                pass
+        _, year_str, code = data.split(":", 2)
+        await select_course(query, context, int(year_str), code)
         return
 
     if data == "show_schedule":
@@ -841,8 +879,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "optimize_schedule":
+        _fire_log_event("optimize_schedule")
         await optimize_schedule(query, context)
         return
+
     await query.answer()
 
 
@@ -856,11 +896,13 @@ async def run_webhook_server(app):
     webhook_path = "webhook"
     webhook_url = f"{external_url.rstrip('/')}/{webhook_path}"
     secret_token = os.environ.get("WEBHOOK_SECRET") or None
+
     async def telegram_webhook(request):
         data = await request.json()
         update = Update.de_json(data=data, bot=app.bot)
         await app.update_queue.put(update)
         return PlainTextResponse("OK")
+
     starlette_app = Starlette(
         routes=[
             Route(f"/{webhook_path}", telegram_webhook, methods=["POST"]),
@@ -868,6 +910,7 @@ async def run_webhook_server(app):
             Route("/", healthcheck, methods=["GET"]),
         ]
     )
+
     webserver = uvicorn.Server(
         config=uvicorn.Config(
             app=starlette_app,
@@ -876,6 +919,10 @@ async def run_webhook_server(app):
             log_level="info",
         )
     )
+
+    logger.info("بدء تشغيل البوت بوضع Webhook على المنفذ %s ...", port)
+    logger.info("عنوان الـ Webhook: %s", webhook_url)
+
     async with app:
         await app.bot.set_webhook(url=webhook_url, secret_token=secret_token, drop_pending_updates=True)
         await app.start()
@@ -887,10 +934,22 @@ async def run_webhook_server(app):
 
 def main():
     if BOT_TOKEN == "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("خطأ: يجب ضبط توكن البوت أولًا.")
+        print(
+            "خطأ: يجب ضبط توكن البوت أولًا.\n"
+            "عدّل قيمة BOT_TOKEN في أعلى bot.py، أو شغّل البوت بهذا الشكل:\n"
+            "  IUST_BOT_TOKEN=123456:ABC-your-token python3 bot.py"
+        )
         return
+
     external_url = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+
     if external_url:
+        if uvicorn is None:
+            print(
+                "خطأ: وضع Webhook يحتاج مكتبتي uvicorn و starlette.\n"
+                "ثبّتهما عبر: pip install -r requirements.txt"
+            )
+            return
         app = Application.builder().token(BOT_TOKEN).updater(None).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("stats", stats))
@@ -901,6 +960,7 @@ def main():
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("stats", stats))
         app.add_handler(CallbackQueryHandler(button_handler))
+        logger.info("بدء تشغيل البوت (long polling)...")
         app.run_polling()
 
 
