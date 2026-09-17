@@ -5,11 +5,11 @@ bot.py
 ------
 بوت تيليغرام لجدول مواد جامعة IUST (WEB SEEKER).
 
-نظام التنقّل ومقارنة التحديثات:
-- مقارنة ذكية ومصنفة (أوقات، دكاترة، قاعات، إضافات وحذوفات).
-- إرسال تنبيه قصير آمن من تجاوز الحروف في تيليغرام.
-- وضع التقرير المفصل بالكامل في ملف PDF.
-- العودة التلقائية الفورية للقائمة الرئيسية.
+رصد التغييرات المهمة فقط:
+- تغيير وقت المادة (الساعة/اليوم).
+- إضافة مواد جديدة.
+- حذف مواد من الجدول.
+إرسال التقرير كملف PDF مع تنبيه قصير والعودة التلقائية للقائمة الرئيسية.
 """
 
 import os
@@ -81,9 +81,6 @@ YEAR_NAMES = {
     5: "السنة الخامسة",
 }
 
-# ---------------------------------------------------------------------------
-# حالة كل مستخدم
-# ---------------------------------------------------------------------------
 user_sessions = {}
 seen_users = set()
 _bot_start_time = datetime.now(timezone.utc)
@@ -94,8 +91,7 @@ def track_user(user):
     seen_users.add(user.id)
     if is_new:
         name = user.full_name or user.username or str(user.id)
-        logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين منذ آخر تشغيل: %s",
-                    name, user.id, len(seen_users))
+        logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s)", name, user.id)
         asyncio.create_task(
             asyncio.to_thread(notifier.register_new_user, user.id, user.username)
         )
@@ -112,10 +108,6 @@ def reset_session(user_id):
     user_sessions[user_id] = {"selected": [], "mode": None, "stack": []}
     return user_sessions[user_id]
 
-
-# ---------------------------------------------------------------------------
-# مكدّس التنقّل
-# ---------------------------------------------------------------------------
 
 SCREEN_START = ("start",)
 
@@ -141,7 +133,7 @@ def pop_screen(session):
 
 async def render_screen(query, context, user_id, descriptor):
     session = get_session(user_id)
-    kind = descriptor[0]
+    kind = descriptor[0] if isinstance(descriptor, tuple) else "start"
 
     if kind == "selection":
         years_data = sd.load_courses()
@@ -173,10 +165,6 @@ async def go_start(query, context, user_id):
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
-# ---------------------------------------------------------------------------
-# أدوات مساعدة
-# ---------------------------------------------------------------------------
-
 def schedule_file_exists():
     return os.path.exists(sd.SCHEDULE_PATH)
 
@@ -207,17 +195,13 @@ def selected_courses_block(years_data, selected_list):
 
 
 # ---------------------------------------------------------------------------
-# منطق مقارنة الجدول المصنف (الأوقات، الدكاترة، القاعات، الإضافات والحذف)
+# رصد التغييرات المهمة فقط (الوقت/اليوم، الإضافات، الحذف)
 # ---------------------------------------------------------------------------
 
-def compare_schedules_categorized(old_data, new_data):
-    categories = {
-        "time_changes": [],
-        "teacher_changes": [],
-        "room_changes": [],
-        "additions": [],
-        "deletions": []
-    }
+def compare_critical_changes(old_data, new_data):
+    time_changes = []
+    additions = []
+    deletions = []
     
     old_courses = {}
     if old_data:
@@ -234,111 +218,66 @@ def compare_schedules_categorized(old_data, new_data):
     # 1. إضافات مواد كاملة
     for key, new_c in new_courses.items():
         if key not in old_courses:
-            categories["additions"].append(f"إضافة مادة كاملة: {new_c['name']} (السنة {key[0]})")
+            additions.append(f"إضافة مادة: **{new_c['name']}** (السنة {key[0]})")
 
     # 2. حذف مواد كاملة
     for key, old_c in old_courses.items():
         if key not in new_courses:
-            categories["deletions"].append(f"حذف مادة كاملة: {old_c['name']} (السنة {key[0]})")
+            deletions.append(f"حذف مادة: **{old_c['name']}** (السنة {key[0]})")
 
-    # 3. مقارنة تفاصيل جلسات المواد المشتركة
+    # 3. مقارنة الأوقات/الأيام للمواد المشتركة
     for key, new_c in new_courses.items():
         if key in old_courses:
             old_c = old_courses[key]
             course_name = new_c['name']
             
-            old_dict = {}
-            for s in old_c.get('sessions', []):
-                k = f"{s.get('activity')}_{s.get('day')}"
-                counter = 1
-                while f"{k}_{counter}" in old_dict: counter += 1
-                old_dict[f"{k}_{counter}"] = s
+            old_dict = {f"{s.get('activity')}_{s.get('day')}_{s.get('start')}_{s.get('end')}": s for s in old_c.get('sessions', [])}
+            new_list = new_c.get('sessions', [])
+            
+            # مراجعة الجلسات الجديدة مقارنة بالقديمة للبحث عن اختلاف الوقت أو اليوم
+            for new_s in new_list:
+                act = new_s.get('activity')
+                day = new_s.get('day')
+                st = str(new_s.get('start') or "").strip()
+                en = str(new_s.get('end') or "").strip()
                 
-            new_dict = {}
-            for s in new_c.get('sessions', []):
-                k = f"{s.get('activity')}_{s.get('day')}"
-                counter = 1
-                while f"{k}_{counter}" in new_dict: counter += 1
-                new_dict[f"{k}_{counter}"] = s
-                
-            for k, new_s in new_dict.items():
-                if k in old_dict:
-                    old_s = old_dict[k]
-                    activity_label = f"{course_name} ({new_s.get('activity')} — يوم {new_s.get('day')})"
+                # ابحث هل نفس النشاط موجود بوقت/يوم مختلف أو هل طرا تعديل توقيت
+                matching_olds = [os for os in old_c.get('sessions', []) if os.get('activity') == act]
+                for old_s in matching_olds:
+                    o_day = old_s.get('day')
+                    o_st = str(old_s.get('start') or "").strip()
+                    o_en = str(old_s.get('end') or "").strip()
                     
-                    # أ) رصد تغيير الأوقات
-                    old_t_start = str(old_s.get('start') or "").strip()
-                    old_t_end = str(old_s.get('end') or "").strip()
-                    new_t_start = str(new_s.get('start') or "").strip()
-                    new_t_end = str(new_s.get('end') or "").strip()
-                    if old_t_start != new_t_start or old_t_end != new_t_end:
-                        categories["time_changes"].append(
-                            f"{activity_label}: من [{old_t_start} – {old_t_end}] ⬅️ أصبح [{new_t_start} – {new_t_end}]"
+                    if (o_day != day) or (o_st != st) or (o_en != en):
+                        # تم رصد تغيير في اليوم أو الوقت لهذه الجلسة
+                        time_changes.append(
+                            f"**{course_name}** ({act}): تغير من [يوم {o_day} | {o_st}-{o_en}] ⬅️ إلى [يوم {day} | {st}-{en}]"
                         )
-                        
-                    # ب) رصد تغيير الدكاترة والمشرفين
-                    old_teacher = str(old_s.get('teacher') or "").strip()
-                    new_teacher = str(new_s.get('teacher') or "").strip()
-                    o_clean = old_teacher if old_teacher and old_teacher not in ["د.ت", "م.ت", "غير محدد"] else "غير محدد"
-                    n_clean = new_teacher if new_teacher and new_teacher not in ["د.ت", "م.ت", "غير محدد"] else "غير محدد"
-                    if o_clean != n_clean:
-                        if o_clean == "غير محدد":
-                            categories["teacher_changes"].append(f"{activity_label}: تم تعيين/تثبيت المشرف ({n_clean})")
-                        elif n_clean == "غير محدد":
-                            categories["teacher_changes"].append(f"{activity_label}: إلغاء/مسح تعيين ({o_clean})")
-                        else:
-                            categories["teacher_changes"].append(f"{activity_label}: تغير الأستاذ من ({o_clean}) ⬅️ إلى ({n_clean})")
+                        break
 
-                    # ج) رصد تغير القاعات
-                    old_room = str(old_s.get('room') or "").strip()
-                    new_room = str(new_s.get('room') or "").strip()
-                    r_old = old_room if old_room else "غير محددة"
-                    r_new = new_room if new_room else "غير محددة"
-                    if r_old != r_new:
-                        categories["room_changes"].append(
-                            f"{activity_label}: انتقلت القاعة من ({r_old}) ⬅️ إلى ({r_new})"
-                        )
-                else:
-                    categories["additions"].append(f"إضافة جلسة فرعية: {course_name} ({new_s.get('activity')} يوم {new_s.get('day')} الساعة {new_s.get('start')})")
-
-            for k, old_s in old_dict.items():
-                if k not in new_dict:
-                    categories["deletions"].append(f"حذف جلسة فرعية: {course_name} ({old_s.get('activity')} يوم {old_s.get('day')} الساعة {old_s.get('start')})")
-
-    # صياغة التقرير النصي للـ PDF
     report_lines = []
-    if categories["time_changes"]:
-        report_lines.append("⏱️ رصد تغيير الأوقات:")
-        for item in categories["time_changes"]: report_lines.append(f"  • {item}")
+    if additions:
+        report_lines.append("🆕 المواد المضافة:")
+        for item in additions: report_lines.append(f"  • {item}")
         report_lines.append("")
         
-    if categories["teacher_changes"]:
-        report_lines.append("👨‍🏫 رصد التغيير بين دكتور وآخر (المشرفين):")
-        for item in categories["teacher_changes"]: report_lines.append(f"  • {item}")
+    if deletions:
+        report_lines.append("❌ المواد المحذوفة:")
+        for item in deletions: report_lines.append(f"  • {item}")
         report_lines.append("")
         
-    if categories["room_changes"]:
-        report_lines.append("🚪 رصد تغير القاعات:")
-        for item in categories["room_changes"]: report_lines.append(f"  • {item}")
-        report_lines.append("")
-        
-    if categories["additions"]:
-        report_lines.append("🆕 تصنيف الإضافات:")
-        for item in categories["additions"]: report_lines.append(f"  • {item}")
-        report_lines.append("")
-        
-    if categories["deletions"]:
-        report_lines.append("❌ تصنيف الحذوفات:")
-        for item in categories["deletions"]: report_lines.append(f"  • {item}")
+    if time_changes:
+        report_lines.append("⏱️ التعديلات في أوقات أو أيام المحاضرات:")
+        for item in time_changes: report_lines.append(f"  • {item}")
         report_lines.append("")
 
-    has_any = any(categories.values())
+    has_any = bool(report_lines)
     if has_any:
-        return "\n".join(report_lines), categories
-    return None, categories
+        return "\n".join(report_lines)
+    return None
 
 
-def create_categorized_html(report_text):
+def create_critical_html(report_text):
     safe_body = report_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
     html = f"""
     <html dir="rtl" lang="ar">
@@ -351,7 +290,7 @@ def create_categorized_html(report_text):
         </style>
     </head>
     <body>
-        <h1>تقرير تحديثات وتغييرات الجدول (WEB SEEKER)</h1>
+        <h1>تقرير التغييرات المهمة في الجدول (WEB SEEKER)</h1>
         <div class="content">
             {safe_body}
         </div>
@@ -580,10 +519,6 @@ async def show_schedule(query, context):
                 )
         except Exception:
             logger.exception("فشل إنشاء أو إرسال ملف PDF للجدول")
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="تعذّر إنشاء ملف PDF للجدول، لكن الجدول النصي أعلاه يحتوي على كل المعلومات.",
-            )
         finally:
             if os.path.exists(pdf_path):
                 try:
@@ -608,7 +543,6 @@ async def run_update_schedule(query, context):
     user_id = query.from_user.id
     had_data_before = schedule_file_exists()
     
-    # 1. جلب البيانات القديمة قبل التحديث للمقارنة
     old_years_data = sd.load_courses() if had_data_before else None
 
     await query.answer("بدأ التحديث، قد يستغرق هذا دقيقة...")
@@ -642,7 +576,6 @@ async def run_update_schedule(query, context):
 
     _last_update_ts["value"] = time.time()
     
-    # 2. تحميل البيانات الجديدة بعد التحديث
     sd.load_courses(force_reload=True)
     new_years_data = sd.load_courses()
     
@@ -651,37 +584,34 @@ async def run_update_schedule(query, context):
     if success:
         note = "تم تحديث الجدول بنجاح بأحدث البيانات من موقع الجامعة.\n\n"
         
-        # 3. مقارنة البيانات المصنفة
         if old_years_data and new_years_data:
-            report_text, cats = compare_schedules_categorized(old_years_data, new_years_data)
+            report_text = compare_critical_changes(old_years_data, new_years_data)
             
             if report_text:
-                # إرسال رسالة تنبيه قصيرة آمنة تماماً من الطول
                 short_msg = (
-                    "⚠️ **تم رصد تحديثات وتغييرات في الجدول الدراسي!**\n"
-                    "📄 تم تضمين التقرير المفصل المصنف (أوقات، دكاترة، قاعات، إضافات/حذف) في ملف الـ PDF المرفق أدناه."
+                    "⚠️ **رصد تغييرات مهمة (أوقات/إضافات/حذف) في الجدول!**\n"
+                    "📄 التفاصيل الكاملة مدرجة في ملف الـ PDF أدناه."
                 )
                 await context.bot.send_message(chat_id=query.message.chat_id, text=short_msg, parse_mode='Markdown')
                 
-                # إنشاء وإرسال ملف PDF المفصل
                 os.makedirs(TEMP_DIR, exist_ok=True)
-                changes_pdf_path = os.path.join(TEMP_DIR, f"WEB_SEEKER_categorized_updates_{user_id}.pdf")
+                changes_pdf_path = os.path.join(TEMP_DIR, f"WEB_SEEKER_critical_updates_{user_id}.pdf")
                 try:
                     from weasyprint import HTML
-                    html_content = create_categorized_html(report_text)
+                    html_content = create_critical_html(report_text)
                     HTML(string=html_content).write_pdf(changes_pdf_path)
                     
                     with open(changes_pdf_path, "rb") as f:
                         await context.bot.send_document(
                             chat_id=query.message.chat_id,
                             document=f,
-                            filename="WEB_SEEKER_updates_report.pdf",
-                            caption="📄 التقرير المفصل للتغييرات والإضافات"
+                            filename="WEB_SEEKER_critical_updates.pdf",
+                            caption="📄 تقرير التغييرات المهمة"
                         )
                 except ImportError:
-                    logger.warning("مكتبة weasyprint غير مثبتة، تعذّر إرسال PDF.")
+                    logger.warning("مكتبة weasyprint غير مثبتة.")
                 except Exception as e:
-                    logger.error(f"خطأ أثناء إنشاء ملف PDF: {e}")
+                    logger.error(f"خطأ PDF: {e}")
                 finally:
                     if os.path.exists(changes_pdf_path):
                         try:
@@ -691,19 +621,19 @@ async def run_update_schedule(query, context):
             else:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id, 
-                    text="✅ تم التحديث بنجاح، ولم يتم رصد أي فروقات أو تغييرات في الأوقات، القاعات، أو الأساتذة."
+                    text="✅ تم التحديث بنجاح، ولم يتم رصد أي تعديل في أوقات المواد أو إضافات/حذف."
                 )
     elif had_data_before:
-        note = "لم يكتمل التحديث بنجاح. سيتم الاستمرار باستخدام البيانات من آخر تحديث ناجح.\n\n"
+        note = "لم يكتمل التحديث بنجاح. سيتم الاستمرار بالبيانات القديمة.\n\n"
     else:
-        note = "فشل التحديث ولا توجد بيانات جدول متاحة حتى الآن.\n"
+        note = "فشل التحديث ولا توجد بيانات متاحة.\n"
         if error_snippet:
             note += f"تفاصيل: {error_snippet}\n"
         note += "\n"
 
     reset_session(user_id)
     
-    # 4. العودة التلقائية الفورية إلى القائمة الرئيسية
+    # العودة الفورية للقائمة الرئيسية
     start_text, start_kb = start_text_and_keyboard(intro_note=note)
     try:
         await query.edit_message_text(start_text, reply_markup=start_kb)
@@ -713,7 +643,7 @@ async def run_update_schedule(query, context):
 
 async def send_all_times_pdf(query, context):
     await query.answer()
-    await query.edit_message_text("جاري تجميع أوقات جميع المواد في ملف PDF...\nقد يستغرق هذا لحظة.")
+    await query.edit_message_text("جاري تجميع أوقات جميع المواد في ملف PDF...")
     years_data = sd.load_courses()
     user_id = query.from_user.id
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -728,11 +658,7 @@ async def send_all_times_pdf(query, context):
                 caption="أوقات جميع المواد الدراسية",
             )
     except Exception:
-        logger.exception("فشل إنشاء أو إرسال PDF جميع الأوقات")
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="تعذّر إنشاء الملف. تأكد من أن بيانات الجدول محدّثة.",
-        )
+        logger.exception("خطأ PDF جميع الأوقات")
     finally:
         if os.path.exists(pdf_path):
             try:
@@ -748,23 +674,16 @@ async def send_all_times_pdf(query, context):
 
 def build_optimized_text(result):
     if result["timed_out"] and not result["schedules"]:
-        return "انتهى وقت المعالجة قبل إيجاد جدول مثالي.\nجرّب اختيار عدد أقل من المواد."
+        return "انتهى وقت المعالجة."
     if not result["schedules"]:
         no_data = result.get("no_data_courses", [])
         if no_data:
-            return "لا توجد معلومات جدول كافية لإنشاء جدول مثالي.\nالمواد التالية بدون معلومات أوقات: " + "، ".join(no_data)
-        return "لم يتمكن النظام من إيجاد أي جدول ممكن للمواد المختارة."
+            return "مواد بدون أوقات: " + "، ".join(no_data)
+        return "لم يتم إيجاد جدول ممكن."
     best = result["schedules"][0]
     lines = ["الجدول المثالي المقترح\n"]
     lines.append(f"عدد أيام الحضور: {best['days_count']}")
-    if best["total_gap_minutes"] == 0:
-        lines.append("لا توجد فراغات بين المحاضرات في أي يوم")
-    else:
-        lines.append(f"مجموع الفراغات بين المحاضرات: {best['total_gap_minutes']} دقيقة")
-    if result["excluded_courses"]:
-        lines.append("\nمواد مستثناة بسبب تعارض حتمي:")
-        for e in result["excluded_courses"]:
-            lines.append(f"  • {e['name']}")
+    lines.append(f"مجموع الفراغات: {best['total_gap_minutes']} دقيقة")
     by_day = {}
     for o in best["options"]:
         for s in o.sessions:
@@ -773,10 +692,7 @@ def build_optimized_text(result):
     for day in ordered_days:
         lines.append(f"\n{day}")
         for _, name, activity, s in sorted(by_day[day], key=lambda x: x[0]):
-            room = f" | القاعة: {s['room']}" if s.get("room") else ""
-            teacher = f" | {s['teacher']}" if s.get("teacher") else ""
-            lines.append(f"  {s['start']} – {s['end']}  —  {name}")
-            lines.append(f"      {activity}{room}{teacher}")
+            lines.append(f"  {s['start']} – {s['end']}  —  {name} ({activity})")
     return "\n".join(lines)
 
 
@@ -798,7 +714,7 @@ async def optimize_schedule(query, context):
             top_n=1, time_budget_seconds=8.0,
         )
     except Exception:
-        logger.exception("خطأ في محرك التحسين")
+        logger.exception("خطأ تحسين")
         reset_session(user_id)
         start_text, start_kb = start_text_and_keyboard()
         await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
@@ -810,14 +726,14 @@ async def optimize_schedule(query, context):
         os.makedirs(TEMP_DIR, exist_ok=True)
         pdf_path = os.path.join(TEMP_DIR, f"optimal_{user_id}.pdf")
         try:
-            stats_lines = [f"عدد أيام الحضور: {best['days_count']}  |  مجموع الفراغات: {best['total_gap_minutes']} دقيقة"]
+            stats_lines = [f"أيام: {best['days_count']} | فراغات: {best['total_gap_minutes']}د"]
             pdf_export.build_optimized_schedule_pdf(best["options"], pdf_path, stats_lines=stats_lines)
             with open(pdf_path, "rb") as f:
                 await context.bot.send_document(
                     chat_id=query.message.chat_id,
                     document=f,
                     filename="webseeker_schedule.pdf",
-                    caption="الجدول المثالي بصيغة PDF",
+                    caption="الجدول المثالي PDF",
                 )
         except Exception:
             pass
@@ -890,9 +806,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         parts = data.split(":")
         if len(parts) >= 3:
-            _, year_str, code = parts[0], parts, parts
             try:
-                await delete_course(query, context, int(year_str), code)
+                await delete_course(query, context, int(parts), parts)
             except ValueError:
                 pass
         return
@@ -913,9 +828,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         parts = data.split(":")
         if len(parts) >= 3:
-            _, year_str, code = parts[0], parts, parts
             try:
-                await select_course(query, context, int(year_str), code)
+                await select_course(query, context, int(parts), parts)
             except ValueError:
                 pass
         return
