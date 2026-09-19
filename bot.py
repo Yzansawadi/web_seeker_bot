@@ -36,6 +36,41 @@ bot.py
 واحدة وتُخزَّن في الذاكرة (انظر schedule_data.load_courses)، ولا تُعاد
 قراءتها من القرص إلا إذا تغيّر أحد الملفين فعليًا.
 
+---------------------------------------------------------------------------
+ملاحظات موثوقية الـ webhook (أُضيفت بعد تشخيص انقطاعات متكرّرة فعلية):
+---------------------------------------------------------------------------
+اجتمعت ثلاث مشاكل منفصلة كانت تُسبّب توقّف البوت عن الاستجابة رغم أن
+Render وUptimeRobot كانا يُظهران أن الخدمة "تعمل بشكل طبيعي":
+
+1) `allowed_updates` كانت تفقد `callback_query` (نوع كل تحديثات الأزرار،
+   أي كل تنقّلات البوت تقريبًا) لأن الكود القديم كان يستدعي setWebhook
+   بدون تحديد allowed_updates إطلاقًا. توثيق تيليغرام الرسمي ينص على أنه
+   "إن لم تُحدَّد، تُستخدَم القيمة السابقة المسجّلة لدى تيليغرام" -- فأي
+   ضبط يدوي/تجريبي قديم نسي تضمين callback_query كان يبقى عالقًا للأبد
+   لأن الكود لم يكن يصحّحه أبدًا. الحل: تحديدها صراحةً في كل استدعاء.
+
+2) خطأ "520" من طبقة Render الأمامية (يعني: لم يصل أي رد من عمليتنا
+   إطلاقًا) كان يحدث أحيانًا لأن الكود القديم كان يستدعي setWebhook
+   (أي يخبر تيليغرام "ابدأ الإرسال الآن") *قبل* أن يبدأ uvicorn فعليًا
+   بالاستماع على المنفذ. أي طلب يصل تيليغرام في تلك الفجوة الزمنية
+   القصيرة يُرفَض فورًا (connection refused) لأنه لا أحد يستمع بعد. الحل:
+   ننتظر فعليًا حتى يصبح uvicorn جاهزًا (webserver.started) قبل استدعاء
+   setWebhook.
+
+3) توثيق تيليغرام ينص أيضًا: "في حال فشل عدة محاولات تسليم متتالية، نتوقف
+   عن المحاولة حتى تُستدعى setWebhook من جديد". أي انقطاع عابر حقيقي
+   (إعادة تشغيل حاوية Render لأي سبب) قد يُدخل تيليغرام في هذه الحالة،
+   ولن يُصلحها إلا استدعاء setWebhook يدويًا -- إلى أن أضفنا مهمة خلفية
+   تُعيد الاستدعاء تلقائيًا كل 20 دقيقة طوال عمر العملية، فتُصلح نفسها
+   ذاتيًا دون أي تدخل يدوي بعد الآن.
+
+ملاحظة مهمة: هذه الإصلاحات لا تُلغي احتمال "الإقلاع البارد" (cold start)
+نفسه على خطة Render المجانية عند توقّف الخدمة فعليًا لفترة طويلة بلا أي
+طلب (Spin down) -- فتلك فجوة حقيقية لا يوجد أحد يستمع خلالها إطلاقًا، بغض
+النظر عن ترتيب الكود. لكنها تُلغي كل الحالات التي كانت مشكلتنا نحن تحديدًا
+(سباق زمني ذاتي، وضبط ناقص، وحالة "استسلام" تيليغرام)، وتجعل النظام يتعافى
+تلقائيًا خلال دقائق معدودة كحد أقصى بدل البقاء معطوبًا حتى تدخل يدوي.
+
 التشغيل محليًا (Polling):
     pip install -r requirements.txt
     python3 bot.py
@@ -104,6 +139,16 @@ UPDATE_COOLDOWN_SECONDS = 2 * 60 * 60  # ساعتان
 _last_update_ts = {"value": 0.0}
 
 EXTRACT_SCRIPT_TIMEOUT_SECONDS = 180
+
+# أنواع التحديثات التي يحتاجها هذا البوت فعليًا: رسائل نصية (الأوامر مثل
+# /start و/stats) وضغطات الأزرار (كل التنقّل والاختيار في البوت يعتمد
+# عليها). تُستخدَم صراحةً في كل استدعاء لـ setWebhook (انظر التعليق
+# التفصيلي أعلى الملف) بدل تركها فارغة.
+WEBHOOK_ALLOWED_UPDATES = ["message", "callback_query"]
+
+# كل كم ثانية تُعاد مهمة "تحديث تسجيل الـ webhook" الخلفية تلقائيًا،
+# كحماية ذاتية دائمة (انظر التعليق التفصيلي أعلى الملف، النقطة 3).
+WEBHOOK_SELF_HEAL_INTERVAL_SECONDS = 20 * 60
 
 YEAR_NAMES = {
     1: "السنة الأولى",
@@ -886,6 +931,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
 
+async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج أخطاء عام: يُسجّل أي استثناء غير متوقّع حدث أثناء معالجة أي
+    تحديث (رسالة أو ضغطة زر) في الـ Logs بدل أن يختفي بصمت. هذا لا يُصلح
+    أي شيء بنفسه، لكنه يمنحنا رؤية واضحة لأي عطل مستقبلي فور حدوثه، بدل
+    اكتشافه بالصدفة لاحقًا من شكوى مستخدم."""
+    logger.error("استثناء غير متوقّع أثناء معالجة تحديث %s", update, exc_info=context.error)
+
+
 async def healthcheck(request):
     return PlainTextResponse("OK")
 
@@ -898,6 +951,17 @@ async def run_webhook_server(app):
     secret_token = os.environ.get("WEBHOOK_SECRET") or None
 
     async def telegram_webhook(request):
+        # تحقّق من صحة الطلب عبر رأس X-Telegram-Bot-Api-Secret-Token: تيليغرام
+        # يرسل هذا الرأس تلقائيًا بالقيمة التي مرّرناها في secret_token عند
+        # setWebhook. هذا تحصين إضافي (لا علاقة له بمشكلة الانقطاعات نفسها)
+        # يمنع أي طرف يعرف رابط الـ webhook فقط (بدون التوكن السرّي) من إرسال
+        # تحديثات مزيّفة لبوتك.
+        if secret_token:
+            incoming_token = request.headers.get("x-telegram-bot-api-secret-token")
+            if incoming_token != secret_token:
+                logger.warning("طلب webhook مرفوض: رأس السرّية غير مطابق أو مفقود.")
+                return PlainTextResponse("Forbidden", status_code=403)
+
         data = await request.json()
         update = Update.de_json(data=data, bot=app.bot)
         await app.update_queue.put(update)
@@ -923,11 +987,67 @@ async def run_webhook_server(app):
     logger.info("بدء تشغيل البوت بوضع Webhook على المنفذ %s ...", port)
     logger.info("عنوان الـ Webhook: %s", webhook_url)
 
+    async def _set_webhook_with_retries(*, drop_pending_updates):
+        """يستدعي setWebhook مع إعادة محاولة قصيرة عند أي فشل عابر (شبكة
+        بطيئة عند الإقلاع مثلاً)، بدل ترك الاستثناء يُسقط العملية بأكملها
+        من أول فشل."""
+        last_exc = None
+        for attempt in range(1, 4):
+            try:
+                await app.bot.set_webhook(
+                    url=webhook_url,
+                    secret_token=secret_token,
+                    drop_pending_updates=drop_pending_updates,
+                    allowed_updates=WEBHOOK_ALLOWED_UPDATES,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.exception("فشلت محاولة %s من %s لضبط الـ webhook", attempt, 3)
+                if attempt < 3:
+                    await asyncio.sleep(2 * attempt)
+        raise last_exc
+
+    async def _refresh_webhook_periodically():
+        """مهمة خلفية دائمة: تعيد تسجيل نفس عنوان الـ webhook بنفس
+        allowed_updates كل WEBHOOK_SELF_HEAL_INTERVAL_SECONDS، بدون
+        drop_pending_updates (حتى لا تُفقَد رسائل وصلت للتو من مستخدمين).
+        هذه حماية ذاتية ضد حالة "تيليغرام تستسلم عن الإرسال بعد عدة فشل
+        متتالٍ" الموثّقة رسميًا -- فتُصلح البوت نفسه تلقائيًا خلال دقائق
+        معدودة كحد أقصى، بدل الحاجة لاستدعاء setWebhook يدويًا كما كان
+        يحدث سابقًا."""
+        while True:
+            await asyncio.sleep(WEBHOOK_SELF_HEAL_INTERVAL_SECONDS)
+            try:
+                await app.bot.set_webhook(
+                    url=webhook_url,
+                    secret_token=secret_token,
+                    allowed_updates=WEBHOOK_ALLOWED_UPDATES,
+                )
+                logger.info("تم تحديث تسجيل الـ webhook الدوري بنجاح.")
+            except Exception:
+                logger.exception(
+                    "فشل التحديث الدوري لتسجيل الـ webhook (ستُعاد المحاولة بعد %s ثانية)",
+                    WEBHOOK_SELF_HEAL_INTERVAL_SECONDS,
+                )
+
     async with app:
-        await app.bot.set_webhook(url=webhook_url, secret_token=secret_token, drop_pending_updates=True)
         await app.start()
+
+        # نُشغّل uvicorn كمهمة خلفية (بدل استدعاء serve() المباشر الذي
+        # يحجب التنفيذ) وننتظر فعليًا حتى يصبح جاهزًا لاستقبال الاتصالات
+        # (webserver.started) *قبل* إخبار تيليغرام بالبدء بالإرسال. هذا
+        # يُغلق تمامًا الفجوة الزمنية التي كانت تسبب خطأ "520" (انظر
+        # الشرح التفصيلي أعلى الملف).
+        server_task = asyncio.create_task(webserver.serve())
+        while not webserver.started:
+            await asyncio.sleep(0.05)
+
+        await _set_webhook_with_retries(drop_pending_updates=True)
+        asyncio.create_task(_refresh_webhook_periodically())
+
         try:
-            await webserver.serve()
+            await server_task
         finally:
             await app.stop()
 
@@ -954,12 +1074,14 @@ def main():
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("stats", stats))
         app.add_handler(CallbackQueryHandler(button_handler))
+        app.add_error_handler(error_handler)
         asyncio.run(run_webhook_server(app))
     else:
         app = Application.builder().token(BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("stats", stats))
         app.add_handler(CallbackQueryHandler(button_handler))
+        app.add_error_handler(error_handler)
         logger.info("بدء تشغيل البوت (long polling)...")
         app.run_polling()
 
