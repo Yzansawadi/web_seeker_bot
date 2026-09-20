@@ -649,18 +649,38 @@ def build_optimized_status_text(result):
     return "لم يتمكن النظام من إيجاد أي جدول ممكن للمواد المختارة."
 
 
-def build_optimized_summary_text(result):
-    """رسالة قصيرة تُرسَل عند نجاح توليد الجدول، بدل الجدول الكامل نصًا
-    (الذي قد يكون طويلًا جدًا مع كثرة المواد) -- كل التفاصيل الكاملة
-    موجودة في ملف الـ PDF المرفق مباشرة بعدها."""
-    best = result["schedules"][0]
-    lines = ["تم إنشاء الجدول المثالي بنجاح."]
-    lines.append(f"عدد أيام الحضور: {best['days_count']}")
+def build_optimized_summary_text(result, chosen_schedules):
+    """
+    رسالة قصيرة تُرسَل عند نجاح توليد الجدول، بدل الجدول الكامل نصًا (الذي
+    قد يكون طويلًا جدًا مع كثرة المواد) -- كل التفاصيل الكاملة موجودة في
+    ملف/ملفات الـ PDF المرفقة مباشرة بعدها.
 
-    if best["total_gap_minutes"] == 0:
-        lines.append("لا توجد فراغات بين المحاضرات في أي يوم.")
+    chosen_schedules تحتوي حلًا واحدًا في الحالة العادية، أو حلّين فقط إذا
+    كانا متقاربين جدًا (نفس عدد أيام الحضور وفرق فراغ صغير -- انظر
+    schedule_optimizer.select_top_schedules)، فيُخبَر الطالب بوضوح أن
+    هناك خيارين مقترحين مع فروقهما، بدل إرسال ملف واحد فقط أو إغراقه
+    بخيارات كثيرة لا فائدة حقيقية منها.
+    """
+    lines = ["تم إنشاء الجدول المثالي بنجاح."]
+
+    if len(chosen_schedules) == 1:
+        best = chosen_schedules[0]
+        lines.append(f"عدد أيام الحضور: {best['days_count']}")
+        if best["total_gap_minutes"] == 0:
+            lines.append("لا توجد فراغات بين المحاضرات في أي يوم.")
+        else:
+            lines.append(f"مجموع الفراغات بين المحاضرات: {best['total_gap_minutes']} دقيقة.")
     else:
-        lines.append(f"مجموع الفراغات بين المحاضرات: {best['total_gap_minutes']} دقيقة.")
+        lines.append(
+            "وُجد خياران متقاربان جدًا بنفس عدد أيام الحضور، بفرق بسيط فقط "
+            "بينهما (يوم راحة مختلف أو شُعبة بديلة لمادة ما)، لذلك سيصلك "
+            "كلاهما لتختار ما يناسبك:"
+        )
+        for i, sched in enumerate(chosen_schedules, start=1):
+            lines.append(
+                f"- الخيار {i}: عدد أيام الحضور {sched['days_count']}، "
+                f"مجموع الفراغات {sched['total_gap_minutes']} دقيقة."
+            )
 
     if result["excluded_courses"]:
         excluded_names = "، ".join(e["name"] for e in result["excluded_courses"])
@@ -672,7 +692,10 @@ def build_optimized_summary_text(result):
             + "، ".join(result["no_data_courses"])
         )
 
-    lines.append("التفاصيل الكاملة مرفقة في ملف PDF أدناه.")
+    if len(chosen_schedules) == 1:
+        lines.append("التفاصيل الكاملة مرفقة في ملف PDF أدناه.")
+    else:
+        lines.append("التفاصيل الكاملة لكل خيار مرفقة في ملف PDF خاص به أدناه.")
     return "\n".join(lines)
 
 
@@ -735,11 +758,17 @@ async def optimize_schedule(query, context):
     selected_snapshot = list(session["selected"])
 
     try:
+        # top_n=2 (لا 1): نطلب أفضل حلّين، لا حلًّا واحدًا فقط، لأن
+        # select_top_schedules أدناه تحتاج مرشّحًا ثانيًا لتقرّر إن كان
+        # قريبًا جدًا من الأول يستحق عرضه أيضًا. هذا لا يُبطئ الحالة
+        # الشائعة عمليًا لأن نفس البحث يمرّ بالأصل على كل الفروع بعدد
+        # الأيام والفراغ المتساويين قبل حسم الأفضل، فطلب ثاني أفضل حل معه
+        # يكاد لا يكلّف شيئًا إضافيًا.
         result = await asyncio.to_thread(
             opt.find_best_schedules,
             years_data, selected_snapshot,
             sd.get_course, sd.time_to_minutes,
-            top_n=1, time_budget_seconds=8.0,
+            top_n=2, time_budget_seconds=8.0,
         )
     except Exception:
         logger.exception("خطأ في محرك التحسين")
@@ -752,31 +781,41 @@ async def optimize_schedule(query, context):
         await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
         return
 
-    if result["schedules"]:
-        result_text = build_optimized_summary_text(result)
+    chosen_schedules = opt.select_top_schedules(result["schedules"]) if result["schedules"] else []
+
+    if chosen_schedules:
+        result_text = build_optimized_summary_text(result, chosen_schedules)
     else:
         result_text = build_optimized_status_text(result)
     await context.bot.send_message(chat_id=query.message.chat_id, text=result_text)
 
-    if result["schedules"]:
-        best = result["schedules"][0]
+    multiple = len(chosen_schedules) > 1
+    for i, sched in enumerate(chosen_schedules, start=1):
         os.makedirs(TEMP_DIR, exist_ok=True)
-        pdf_path = os.path.join(TEMP_DIR, f"optimal_{user_id}.pdf")
+        suffix = f"_{i}" if multiple else ""
+        pdf_path = os.path.join(TEMP_DIR, f"optimal_{user_id}{suffix}.pdf")
         try:
-            stats_lines = [f"عدد أيام الحضور: {best['days_count']}  |  مجموع الفراغات: {best['total_gap_minutes']} دقيقة"]
+            stats_lines = []
+            if multiple:
+                stats_lines.append(f"الخيار {i} من {len(chosen_schedules)}")
+            stats_lines.append(
+                f"عدد أيام الحضور: {sched['days_count']}  |  مجموع الفراغات: {sched['total_gap_minutes']} دقيقة"
+            )
             if result["excluded_courses"]:
                 excl = "، ".join(e["name"] for e in result["excluded_courses"])
                 stats_lines.append(f"مواد مستثناة: {excl}")
-            pdf_export.build_optimized_schedule_pdf(best["options"], pdf_path, stats_lines=stats_lines)
+            pdf_export.build_optimized_schedule_pdf(sched["options"], pdf_path, stats_lines=stats_lines)
+            filename = "webseeker_schedule.pdf" if not multiple else f"webseeker_schedule_{i}.pdf"
+            caption = "الجدول المثالي بصيغة PDF" if not multiple else f"الخيار {i} بصيغة PDF"
             with open(pdf_path, "rb") as f:
                 await context.bot.send_document(
                     chat_id=query.message.chat_id,
                     document=f,
-                    filename="webseeker_schedule.pdf",
-                    caption="الجدول المثالي بصيغة PDF",
+                    filename=filename,
+                    caption=caption,
                 )
         except Exception:
-            logger.exception("فشل إنشاء أو إرسال PDF الجدول المثالي")
+            logger.exception("فشل إنشاء أو إرسال PDF الجدول المثالي (الخيار %s)", i)
         finally:
             if os.path.exists(pdf_path):
                 try:
