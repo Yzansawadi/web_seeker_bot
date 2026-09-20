@@ -311,28 +311,11 @@ def _draw_footer(c):
 
 
 def build_schedule_pdf(years_data, selected_list, output_path, student_name=None):
-    _register_fonts()
-    c = canvas.Canvas(output_path, pagesize=A4)
-    _draw_header(c)
-    y = PAGE_H - HEADER_HEIGHT - 8 * mm
-    c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
-    c.drawCentredString(PAGE_W / 2, y, _ar("الجدول الدراسي الأسبوعي"))
-    y -= 7 * mm
-    accent_w = 26 * mm
-    c.setStrokeColor(colors.HexColor(BRAND_ACCENT))
-    c.setLineWidth(2.2)
-    c.line(PAGE_W / 2 - accent_w / 2, y, PAGE_W / 2 + accent_w / 2, y)
-    y -= 9 * mm
-    all_sessions = []
-    for year, code in selected_list:
-        course = sd.get_course(years_data, year, code)
-        if not course:
-            continue
-        for s in course["sessions"]:
-            all_sessions.append((s["day"], s["start_min"], course["name"], s))
-    _draw_sessions_body(c, y, all_sessions)
-    _draw_footer(c)
-    c.save()
+    """ملف "عرض الجدول" (المواد التي اختارها الطالب): التصميم الكحلي الجديد
+    موجود في selected_schedule_pdf.py. الاستيراد هنا داخل الدالة عمدًا لتفادي
+    الاستيراد الدائري بين الملفين."""
+    import selected_schedule_pdf
+    selected_schedule_pdf.build_schedule_pdf(years_data, selected_list, output_path, student_name)
 
 
 def build_optimized_schedule_pdf(chosen_options, output_path, stats_lines=None):
