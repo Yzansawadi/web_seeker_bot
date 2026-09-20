@@ -402,42 +402,6 @@ def format_course_info(course):
     return "\n".join(lines)
 
 
-def build_full_schedule_text(years_data, selected_list):
-    if not selected_list:
-        return "لم تقم باختيار أي مادة حتى الآن."
-
-    all_sessions = []
-    for year, code in selected_list:
-        course = sd.get_course(years_data, year, code)
-        if not course:
-            continue
-        for s in course["sessions"]:
-            all_sessions.append((s["day"], s["start_min"], course["name"], s))
-
-    if not all_sessions:
-        return "لا تتوفر معلومات جدول للمواد التي اخترتها."
-
-    by_day = {}
-    for day, start_min, name, s in all_sessions:
-        by_day.setdefault(day, []).append((start_min, name, s))
-
-    ordered_days = [d for d in sd.DAY_ORDER if d in by_day]
-
-    lines = ["جدولك الأسبوعي\n"]
-    for day in ordered_days:
-        lines.append(f"\n{day}")
-        sessions_today = sorted(by_day[day], key=lambda x: x[0])
-        for _, name, s in sessions_today:
-            room = f" | القاعة: {s['room']}" if s["room"] else ""
-            teacher = f" | {s['teacher']}" if s["teacher"] else ""
-            lines.append(
-                f"  {s['start']} – {s['end']}  —  {name}\n"
-                f"      {s['activity']}{room}{teacher}"
-            )
-
-    return "\n".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # بناء نص ولوحة الشاشة الرئيسية / شاشة الاختيار
 # ---------------------------------------------------------------------------
@@ -557,32 +521,43 @@ async def show_schedule(query, context):
     years_data = sd.load_courses()
 
     selected_snapshot = list(session["selected"])
-    text = build_full_schedule_text(years_data, selected_snapshot)
-    await query.edit_message_text(text)
 
-    if selected_snapshot:
-        os.makedirs(TEMP_DIR, exist_ok=True)
-        pdf_path = os.path.join(TEMP_DIR, f"schedule_{user_id}.pdf")
-        try:
-            pdf_export.build_schedule_pdf(years_data, selected_snapshot, pdf_path)
-            with open(pdf_path, "rb") as f:
-                await context.bot.send_document(
-                    chat_id=query.message.chat_id,
-                    document=f,
-                    filename="times_schedule.pdf",
-                )
-        except Exception:
-            logger.exception("فشل إنشاء أو إرسال ملف PDF للجدول")
-            await context.bot.send_message(
+    if not selected_snapshot:
+        await query.edit_message_text("لم تقم باختيار أي مادة حتى الآن.")
+        reset_session(user_id)
+        start_text, start_kb = start_text_and_keyboard()
+        await context.bot.send_message(
+            chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb
+        )
+        return
+
+    # لا نُرسل الجدول كنصّ كامل في المحادثة (قد يكون طويلًا جدًا مع كثرة
+    # المواد)، نكتفي برسالة انتظار قصيرة، وكل التفاصيل تكون في ملف الـ PDF
+    # المرفق بعدها مباشرة.
+    await query.edit_message_text("جاري تحضير ملف الجدول...\nيرجى الانتظار قليلاً.")
+
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    pdf_path = os.path.join(TEMP_DIR, f"schedule_{user_id}.pdf")
+    try:
+        pdf_export.build_schedule_pdf(years_data, selected_snapshot, pdf_path)
+        with open(pdf_path, "rb") as f:
+            await context.bot.send_document(
                 chat_id=query.message.chat_id,
-                text="تعذّر إنشاء ملف PDF للجدول، لكن الجدول النصي أعلاه يحتوي على كل المعلومات.",
+                document=f,
+                filename="times_schedule.pdf",
             )
-        finally:
-            if os.path.exists(pdf_path):
-                try:
-                    os.remove(pdf_path)
-                except OSError:
-                    pass
+    except Exception:
+        logger.exception("فشل إنشاء أو إرسال ملف PDF للجدول")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="تعذّر إنشاء ملف PDF للجدول. حاول مجددًا لاحقًا.",
+        )
+    finally:
+        if os.path.exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+            except OSError:
+                pass
 
     reset_session(user_id)
     start_text, start_kb = start_text_and_keyboard()
@@ -656,60 +631,48 @@ async def run_update_schedule(query, context):
     await query.edit_message_text(start_text, reply_markup=start_kb)
 
 
-def build_optimized_text(result):
+def build_optimized_status_text(result):
+    """رسالة نصية تُستخدم فقط في الحالات التي لا يُرسَل فيها أي ملف PDF
+    (فشل تام في إيجاد أي حل، أو انتهاء الوقت قبل التوصّل لنتيجة)."""
     if result["timed_out"] and not result["schedules"]:
         return (
             "انتهى وقت المعالجة قبل إيجاد جدول مثالي.\n"
             "جرّب اختيار عدد أقل من المواد للحصول على نتيجة أسرع."
         )
 
-    if not result["schedules"]:
-        no_data = result.get("no_data_courses", [])
-        if no_data:
-            return (
-                "لا توجد معلومات جدول كافية لإنشاء جدول مثالي.\n"
-                "المواد التالية بدون معلومات أوقات: " + "، ".join(no_data)
-            )
-        return "لم يتمكن النظام من إيجاد أي جدول ممكن للمواد المختارة."
+    no_data = result.get("no_data_courses", [])
+    if no_data:
+        return (
+            "لا توجد معلومات جدول كافية لإنشاء جدول مثالي.\n"
+            "المواد التالية بدون معلومات أوقات: " + "، ".join(no_data)
+        )
+    return "لم يتمكن النظام من إيجاد أي جدول ممكن للمواد المختارة."
 
+
+def build_optimized_summary_text(result):
+    """رسالة قصيرة تُرسَل عند نجاح توليد الجدول، بدل الجدول الكامل نصًا
+    (الذي قد يكون طويلًا جدًا مع كثرة المواد) -- كل التفاصيل الكاملة
+    موجودة في ملف الـ PDF المرفق مباشرة بعدها."""
     best = result["schedules"][0]
-    lines = ["الجدول المثالي المقترح\n"]
-
+    lines = ["تم إنشاء الجدول المثالي بنجاح."]
     lines.append(f"عدد أيام الحضور: {best['days_count']}")
+
     if best["total_gap_minutes"] == 0:
-        lines.append("لا توجد فراغات بين المحاضرات في أي يوم")
+        lines.append("لا توجد فراغات بين المحاضرات في أي يوم.")
     else:
-        lines.append(f"مجموع الفراغات بين المحاضرات: {best['total_gap_minutes']} دقيقة")
+        lines.append(f"مجموع الفراغات بين المحاضرات: {best['total_gap_minutes']} دقيقة.")
 
     if result["excluded_courses"]:
-        lines.append("")
-        lines.append("مواد مستثناة بسبب تعارض حتمي:")
-        for e in result["excluded_courses"]:
-            lines.append(f"  • {e['name']}")
-        lines.append("(لا توجد أي تركيبة أوقات تسمح بدمجها مع بقية مواداتك)")
+        excluded_names = "، ".join(e["name"] for e in result["excluded_courses"])
+        lines.append(f"تعذّر تضمين المواد التالية بسبب تعارض حتمي: {excluded_names}")
 
     if result.get("no_data_courses"):
-        lines.append("")
-        lines.append("مواد بدون معلومات أوقات (لم تُدرَج في الجدول):")
-        for name in result["no_data_courses"]:
-            lines.append(f"  • {name}")
+        lines.append(
+            "مواد بدون معلومات أوقات (لم تُدرَج في الجدول): "
+            + "، ".join(result["no_data_courses"])
+        )
 
-    by_day = {}
-    for o in best["options"]:
-        for s in o.sessions:
-            by_day.setdefault(s["day"], []).append((s["start_min"], o.course_name, o.activity, s))
-
-    ordered_days = [d for d in sd.DAY_ORDER if d in by_day]
-    if ordered_days:
-        lines.append("")
-    for day in ordered_days:
-        lines.append(f"\n{day}")
-        for _, name, activity, s in sorted(by_day[day], key=lambda x: x[0]):
-            room = f" | القاعة: {s['room']}" if s.get("room") else ""
-            teacher = f" | {s['teacher']}" if s.get("teacher") else ""
-            lines.append(f"  {s['start']} – {s['end']}  —  {name}")
-            lines.append(f"      {activity}{room}{teacher}")
-
+    lines.append("التفاصيل الكاملة مرفقة في ملف PDF أدناه.")
     return "\n".join(lines)
 
 
@@ -789,7 +752,10 @@ async def optimize_schedule(query, context):
         await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
         return
 
-    result_text = build_optimized_text(result)
+    if result["schedules"]:
+        result_text = build_optimized_summary_text(result)
+    else:
+        result_text = build_optimized_status_text(result)
     await context.bot.send_message(chat_id=query.message.chat_id, text=result_text)
 
     if result["schedules"]:

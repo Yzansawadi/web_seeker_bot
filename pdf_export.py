@@ -7,7 +7,6 @@ from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.utils import ImageReader
 
 import schedule_data as sd
 import arabic_text
@@ -16,12 +15,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FONTS_DIR = os.path.join(BASE_DIR, "fonts")
 FONT_NAME = "Arabic"
 FONT_NAME_BOLD = "Arabic-Bold"
-BRAND_FONT_NAME = "Orbitron-Bold"
-BRAND_FONT_PATH = os.path.join(FONTS_DIR, "Orbitron-Bold.ttf")
-LOGO_PATH = os.path.join(FONTS_DIR, "iust_logo.png")
 
 _font_registered = False
-_brand_font_registered = False
 
 
 def _register_fonts():
@@ -51,17 +46,6 @@ def _register_fonts():
     _font_registered = True
 
 
-def _register_brand_font():
-    global _brand_font_registered
-    if _brand_font_registered:
-        return True
-    if not os.path.isfile(BRAND_FONT_PATH):
-        return False
-    pdfmetrics.registerFont(TTFont(BRAND_FONT_NAME, BRAND_FONT_PATH))
-    _brand_font_registered = True
-    return True
-
-
 def _ar(text):
     if text is None:
         return ""
@@ -77,11 +61,11 @@ TITLE_SIZE = 18
 DAY_HEADER_SIZE = 14
 COURSE_NAME_SIZE = 12
 DETAIL_SIZE = 10
-HEADER_HEIGHT = 22 * mm
-HEADER_BG_COLOR = "#005078"
-HEADER_ACCENT_COLOR = "#E6BE00"
-HEADER_LOGO_SIZE = 15 * mm
-BRAND_NAME_SIZE = 19
+# تصميم أحادي اللون بالكامل (أسود/أبيض/رمادي فاتح فقط)، بلا أي شريط
+# ملوّن وبلا أي تدرّج لوني، ليبقى الملف واضحًا تمامًا عند الطباعة
+# بالأبيض والأسود.
+HEADER_HEIGHT = 16 * mm
+BRAND_NAME_SIZE = 14
 BRAND_TEXT = "WebSeeker"
 
 
@@ -92,23 +76,19 @@ def _new_page(c):
 
 
 def _draw_header(c):
-    c.setFillColor(colors.HexColor(HEADER_BG_COLOR))
-    c.rect(0, PAGE_H - HEADER_HEIGHT, PAGE_W, HEADER_HEIGHT, fill=1, stroke=0)
-    logo_x = MARGIN
-    logo_y = PAGE_H - HEADER_HEIGHT + (HEADER_HEIGHT - HEADER_LOGO_SIZE) / 2
-    if os.path.isfile(LOGO_PATH):
-        logo = ImageReader(LOGO_PATH)
-        c.drawImage(logo, logo_x, logo_y, width=HEADER_LOGO_SIZE, height=HEADER_LOGO_SIZE,
-                     mask="auto", preserveAspectRatio=True)
-    if _register_brand_font():
-        c.setFillColor(colors.white)
-        c.setFont(BRAND_FONT_NAME, BRAND_NAME_SIZE)
-        text_x = logo_x + HEADER_LOGO_SIZE + 4 * mm
-        text_baseline_y = PAGE_H - HEADER_HEIGHT / 2 - (BRAND_NAME_SIZE * 0.32)
-        c.drawString(text_x, text_baseline_y, BRAND_TEXT)
-    c.setStrokeColor(colors.HexColor(HEADER_ACCENT_COLOR))
-    c.setLineWidth(1.5)
-    c.line(0, PAGE_H - HEADER_HEIGHT, PAGE_W, PAGE_H - HEADER_HEIGHT)
+    """رأس بسيط تمامًا: فقط كلمة WebSeeker بخط أسود غامق أعلى اليسار، مع
+    خط أفقي رفيع أسود يفصل الرأس عن المحتوى. بلا أي شريط ملوّن أو شعار،
+    وبلا أي تدرّج لوني أو خط مزخرف، حفاظًا على مظهر احترافي رتيب يبقى
+    واضحًا تمامًا عند الطباعة بالأبيض والأسود."""
+    c.setFillColor(colors.black)
+    c.setFont(FONT_NAME_BOLD, BRAND_NAME_SIZE)
+    text_baseline_y = PAGE_H - 10 * mm
+    c.drawString(LEFT_X, text_baseline_y, BRAND_TEXT)
+
+    rule_y = PAGE_H - HEADER_HEIGHT
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.8)
+    c.line(LEFT_X, rule_y, RIGHT_X, rule_y)
     c.setFillColor(colors.black)
 
 
@@ -132,9 +112,9 @@ def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
     if extra_intro_lines:
         max_text_width = CONTENT_W - 6 * mm
         for text, size in extra_intro_lines:
-            c.setFont(FONT_NAME, size)
-            c.setFillColor(colors.HexColor("#1F3864"))
-            wrapped = _wrap_text_to_width(c, _ar(text), FONT_NAME, size, max_text_width)
+            c.setFont(FONT_NAME_BOLD, size)
+            c.setFillColor(colors.black)
+            wrapped = _wrap_text_to_width(c, _ar(text), FONT_NAME_BOLD, size, max_text_width)
             line_height = size * 1.5
             for wrapped_line in wrapped:
                 c.drawCentredString(PAGE_W / 2, y, wrapped_line)
@@ -151,20 +131,25 @@ def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
         c.drawCentredString(PAGE_W / 2, y, _ar("لا توجد معلومات جدول للمواد المختارة."))
         return y
 
-    day_colors = ["#1F3864", "#2E5395", "#3D6BB3", "#4F81BD", "#6FA8DC", "#9FC5E8", "#C9DAF8"]
-    for day_idx, day in enumerate(ordered_days):
+    # تصميم أحادي اللون بالكامل: شريط يوم واحد أسود صلب لكل الأيام (لا
+    # تدرّج من الغامق للفاتح كما كان سابقًا)، وتظليل رمادي فاتح متناوب
+    # صلب (لا أزرق متدرّج) لتمييز الصفوف، مع إطار أسود رفيع حول كل حصة
+    # يضمن وضوحًا كاملاً حتى عند الطباعة بالأبيض والأسود.
+    entry_idx = 0
+    for day in ordered_days:
         sessions_today = sorted(by_day[day], key=lambda x: x[0])
         needed_height = 12 * mm + len(sessions_today) * 16 * mm
         if y - needed_height < MARGIN:
             y = _new_page(c)
-        header_color = colors.HexColor(day_colors[day_idx % len(day_colors)])
-        c.setFillColor(header_color)
-        c.roundRect(LEFT_X, y - 9 * mm, CONTENT_W, 9 * mm, 2 * mm, fill=1, stroke=0)
+
+        c.setFillColor(colors.black)
+        c.rect(LEFT_X, y - 9 * mm, CONTENT_W, 9 * mm, fill=1, stroke=0)
         c.setFillColor(colors.white)
         c.setFont(FONT_NAME_BOLD, DAY_HEADER_SIZE)
         c.drawCentredString(PAGE_W / 2, y - 6.5 * mm, _ar(day))
         y -= 13 * mm
         c.setFillColor(colors.black)
+
         for _, name, s in sessions_today:
             if y - 16 * mm < MARGIN:
                 y = _new_page(c)
@@ -172,12 +157,18 @@ def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
             time_range = f"{s['start']} - {s['end']}"
             room = s["room"]
             teacher = s["teacher"]
-            c.setFillColor(colors.HexColor("#F2F6FC"))
-            c.roundRect(LEFT_X, y - 14 * mm, CONTENT_W, 13 * mm, 1.5 * mm, fill=1, stroke=0)
+
+            if entry_idx % 2 == 0:
+                c.setFillColor(colors.HexColor("#EFEFEF"))
+                c.rect(LEFT_X, y - 14 * mm, CONTENT_W, 13 * mm, fill=1, stroke=0)
+            c.setStrokeColor(colors.black)
+            c.setLineWidth(0.6)
+            c.rect(LEFT_X, y - 14 * mm, CONTENT_W, 13 * mm, fill=0, stroke=1)
+
             c.setFillColor(colors.black)
             c.setFont(FONT_NAME_BOLD, COURSE_NAME_SIZE)
             c.drawRightString(RIGHT_X - 3 * mm, y - 5.5 * mm, _ar(name))
-            c.setFont(FONT_NAME, DETAIL_SIZE)
+            c.setFont(FONT_NAME_BOLD, DETAIL_SIZE)
             c.drawString(LEFT_X + 3 * mm, y - 5.5 * mm, time_range)
             detail_parts = [activity]
             if room:
@@ -186,10 +177,11 @@ def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
                 detail_parts.append(teacher)
             detail_text = "  |  ".join(detail_parts)
             c.setFont(FONT_NAME, DETAIL_SIZE - 1)
-            c.setFillColor(colors.HexColor("#444444"))
+            c.setFillColor(colors.HexColor("#333333"))
             c.drawRightString(RIGHT_X - 3 * mm, y - 11 * mm, _ar(detail_text))
             c.setFillColor(colors.black)
             y -= 16 * mm
+            entry_idx += 1
         y -= 4 * mm
     return y
 
@@ -208,7 +200,7 @@ def build_schedule_pdf(years_data, selected_list, output_path, student_name=None
     c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
     c.drawCentredString(PAGE_W / 2, y, _ar("الجدول الدراسي الأسبوعي"))
     y -= 10 * mm
-    c.setStrokeColor(colors.HexColor("#1F3864"))
+    c.setStrokeColor(colors.black)
     c.setLineWidth(1)
     c.line(LEFT_X, y, RIGHT_X, y)
     y -= 8 * mm
@@ -232,7 +224,7 @@ def build_optimized_schedule_pdf(chosen_options, output_path, stats_lines=None):
     c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
     c.drawCentredString(PAGE_W / 2, y, _ar("الجدول المثالي المُقترَح"))
     y -= 10 * mm
-    c.setStrokeColor(colors.HexColor("#1F3864"))
+    c.setStrokeColor(colors.black)
     c.setLineWidth(1)
     c.line(LEFT_X, y, RIGHT_X, y)
     y -= 8 * mm
