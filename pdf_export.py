@@ -61,12 +61,38 @@ TITLE_SIZE = 18
 DAY_HEADER_SIZE = 14
 COURSE_NAME_SIZE = 12
 DETAIL_SIZE = 10
-# تصميم أحادي اللون بالكامل (أسود/أبيض/رمادي فاتح فقط)، بلا أي شريط
-# ملوّن وبلا أي تدرّج لوني، ليبقى الملف واضحًا تمامًا عند الطباعة
-# بالأبيض والأسود.
+# تصميم احترافي ملوّن لكنه اقتصادي بالحبر: بلا أي تدرّج لوني (كل لون هنا
+# لون صلب واحد مستقل، لا يندرج ضمن مقياس من الغامق للفاتح)، وبلا تلوين
+# خلفيات كاملة كبيرة -- الألوان تُستخدَم كلمسات (دوائر صغيرة، أشرطة جانبية
+# رفيعة، شارات وقت) لا كخلفيات مشبعة، فتبقى الطباعة عملية واقتصادية.
 HEADER_HEIGHT = 16 * mm
 BRAND_NAME_SIZE = 14
 BRAND_TEXT = "WebSeeker"
+BRAND_ACCENT = "#123A5C"
+
+DAY_COLORS = {
+    "السبت": "#0F4C5C",
+    "الأحد": "#9A031E",
+    "الاثنين": "#1B4332",
+    "الثلاثاء": "#5B2C6F",
+    "الأربعاء": "#B5651D",
+    "الخميس": "#14213D",
+    "الجمعة": "#6B4226",
+}
+DAY_COLOR_DEFAULT = "#333333"
+
+
+def _day_color(day):
+    return colors.HexColor(DAY_COLORS.get(day, DAY_COLOR_DEFAULT))
+
+
+def _tint(color_obj, factor=0.88):
+    """يُخفّف لونًا صلبًا نحو الأبيض (خلط ألوان حقيقي، وليس شفافية) لإنتاج
+    نسخة فاتحة جدًا منه تصلح كخلفية بطاقة/شارة خفيفة الحبر عند الطباعة."""
+    r = color_obj.red + (1 - color_obj.red) * factor
+    g = color_obj.green + (1 - color_obj.green) * factor
+    b = color_obj.blue + (1 - color_obj.blue) * factor
+    return colors.Color(r, g, b)
 
 
 def _new_page(c):
@@ -76,18 +102,22 @@ def _new_page(c):
 
 
 def _draw_header(c):
-    """رأس بسيط تمامًا: فقط كلمة WebSeeker بخط أسود غامق أعلى اليسار، مع
-    خط أفقي رفيع أسود يفصل الرأس عن المحتوى. بلا أي شريط ملوّن أو شعار،
-    وبلا أي تدرّج لوني أو خط مزخرف، حفاظًا على مظهر احترافي رتيب يبقى
-    واضحًا تمامًا عند الطباعة بالأبيض والأسود."""
+    """رأس بسيط وأنيق: كلمة WebSeeker بخط أسود غامق أعلى اليسار مع نقطة
+    صغيرة بلون العلامة، وخط رفيع بلون العلامة يفصل الرأس عن المحتوى. بلا
+    أي شريط ملوّن ثقيل أو شعار، وبلا أي تدرّج لوني، فيبقى المظهر احترافيًا
+    واقتصاديًا عند الطباعة الفعلية."""
     c.setFillColor(colors.black)
     c.setFont(FONT_NAME_BOLD, BRAND_NAME_SIZE)
     text_baseline_y = PAGE_H - 10 * mm
     c.drawString(LEFT_X, text_baseline_y, BRAND_TEXT)
 
+    brand_w = pdfmetrics.stringWidth(BRAND_TEXT, FONT_NAME_BOLD, BRAND_NAME_SIZE)
+    c.setFillColor(colors.HexColor(BRAND_ACCENT))
+    c.circle(LEFT_X + brand_w + 3 * mm, text_baseline_y + 1.6 * mm, 1.1 * mm, fill=1, stroke=0)
+
     rule_y = PAGE_H - HEADER_HEIGHT
-    c.setStrokeColor(colors.black)
-    c.setLineWidth(0.8)
+    c.setStrokeColor(colors.HexColor(BRAND_ACCENT))
+    c.setLineWidth(1)
     c.line(LEFT_X, rule_y, RIGHT_X, rule_y)
     c.setFillColor(colors.black)
 
@@ -108,19 +138,136 @@ def _wrap_text_to_width(c, text, font_name, font_size, max_width):
     return lines
 
 
+def _draw_time_chip(c, x_left, y_top, text, color, font_size=9):
+    """شارة وقت صغيرة ملوّنة (مساحة حبر محدودة جدًا) بدل تلوين خلفية
+    البطاقة كاملة -- لمسة أنيقة اقتصادية بالحبر."""
+    height = 5.6 * mm
+    pad = 2.6 * mm
+    w = pdfmetrics.stringWidth(text, FONT_NAME_BOLD, font_size) + 2 * pad
+    y_bottom = y_top - height
+    c.setFillColor(color)
+    c.roundRect(x_left, y_bottom, w, height, height / 2, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont(FONT_NAME_BOLD, font_size)
+    c.drawCentredString(x_left + w / 2, y_bottom + height / 2 - font_size * 0.32, text)
+    c.setFillColor(colors.black)
+    return w
+
+
+def _draw_intro_banner(c, y, lines_with_sizes):
+    """صندوق ملخّص علوي بخلفية فاتحة جدًا بلون العلامة (تخفيف حقيقي نحو
+    الأبيض، لا تشبّع كامل ولا شفافية) يُبرز إحصائيات الجدول المثالي بشكل
+    أنيق، بدل أسطر نص معزولة على خلفية بيضاء عادية."""
+    if not lines_with_sizes:
+        return y
+
+    accent = colors.HexColor(BRAND_ACCENT)
+    font_size = lines_with_sizes[0][1]
+    max_text_width = CONTENT_W - 12 * mm
+
+    wrapped_lines = []
+    for text, size in lines_with_sizes:
+        wrapped_lines.extend(_wrap_text_to_width(c, _ar(text), FONT_NAME_BOLD, size, max_text_width))
+
+    line_height = font_size * 1.55
+    banner_h = len(wrapped_lines) * line_height + 7 * mm
+    banner_bottom = y - banner_h
+
+    c.setFillColor(_tint(accent, 0.90))
+    c.roundRect(LEFT_X, banner_bottom, CONTENT_W, banner_h, 2.5 * mm, fill=1, stroke=0)
+    c.setStrokeColor(accent)
+    c.setLineWidth(0.8)
+    c.roundRect(LEFT_X, banner_bottom, CONTENT_W, banner_h, 2.5 * mm, fill=0, stroke=1)
+
+    text_y = y - 5.3 * mm
+    c.setFont(FONT_NAME_BOLD, font_size)
+    c.setFillColor(accent)
+    for line in wrapped_lines:
+        c.drawCentredString(PAGE_W / 2, text_y, line)
+        text_y -= line_height
+
+    c.setFillColor(colors.black)
+    return banner_bottom - 6 * mm
+
+
+def _draw_day_header(c, y, day, day_num, day_color):
+    """رأس يوم أنيق واقتصادي بالحبر: دائرة صغيرة ملوّنة برقم تسلسلي بدل
+    شريط أسود كامل العرض يستهلك حبرًا كثيرًا، مع اسم اليوم بخط ملوّن غامق،
+    وخط رفيع ملوّن يفصل رأس اليوم عن حصصه."""
+    header_top = y
+    circle_r = 3.6 * mm
+    circle_cx = RIGHT_X - circle_r
+    circle_cy = header_top - 6 * mm
+
+    c.setFillColor(day_color)
+    c.circle(circle_cx, circle_cy, circle_r, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont(FONT_NAME_BOLD, 9)
+    c.drawCentredString(circle_cx, circle_cy - 3, str(day_num))
+
+    c.setFillColor(day_color)
+    c.setFont(FONT_NAME_BOLD, DAY_HEADER_SIZE)
+    c.drawRightString(circle_cx - circle_r - 3 * mm, circle_cy - 3, _ar(day))
+
+    rule_y = header_top - 10 * mm
+    c.setStrokeColor(day_color)
+    c.setLineWidth(1.3)
+    c.line(LEFT_X, rule_y, RIGHT_X, rule_y)
+
+    c.setFillColor(colors.black)
+    c.setStrokeColor(colors.black)
+    return header_top - 13 * mm
+
+
+def _draw_session_card(c, y, name, s, day_color, entry_idx):
+    """بطاقة حصة أنيقة واقتصادية بالحبر: شريط لوني رفيع جانبي (٣مم فقط)
+    يربطها بصريًا بيوم معيّن بدل تلوين البطاقة كاملة، وشارة وقت ملوّنة
+    صغيرة، وإطار رفيع رمادي (لا أسود صلب) حول البطاقة."""
+    card_top = y
+    card_h = 13 * mm
+    card_bottom = card_top - card_h
+    stripe_w = 3 * mm
+
+    if entry_idx % 2 == 0:
+        c.setFillColor(colors.HexColor("#F7F7F7"))
+        c.rect(LEFT_X, card_bottom, CONTENT_W, card_h, fill=1, stroke=0)
+
+    c.setFillColor(day_color)
+    c.rect(RIGHT_X - stripe_w, card_bottom, stripe_w, card_h, fill=1, stroke=0)
+
+    c.setStrokeColor(colors.HexColor("#BFBFBF"))
+    c.setLineWidth(0.6)
+    c.rect(LEFT_X, card_bottom, CONTENT_W, card_h, fill=0, stroke=1)
+
+    name_right_edge = RIGHT_X - stripe_w - 3 * mm
+    c.setFillColor(colors.black)
+    c.setFont(FONT_NAME_BOLD, COURSE_NAME_SIZE)
+    c.drawRightString(name_right_edge, card_top - 5.4 * mm, _ar(name))
+
+    activity = s["activity"]
+    time_range = f"{s['start']} - {s['end']}"
+    room = s["room"]
+    teacher = s["teacher"]
+    _draw_time_chip(c, LEFT_X + 3 * mm, card_top - 3.4 * mm, time_range, day_color)
+
+    detail_parts = [activity]
+    if room:
+        detail_parts.append(f"القاعة: {room}")
+    if teacher:
+        detail_parts.append(teacher)
+    detail_text = "  |  ".join(detail_parts)
+    c.setFont(FONT_NAME, DETAIL_SIZE - 1)
+    c.setFillColor(colors.HexColor("#555555"))
+    c.drawRightString(name_right_edge, card_top - 11 * mm, _ar(detail_text))
+
+    c.setFillColor(colors.black)
+    c.setStrokeColor(colors.black)
+    return card_bottom - 3 * mm
+
+
 def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
     if extra_intro_lines:
-        max_text_width = CONTENT_W - 6 * mm
-        for text, size in extra_intro_lines:
-            c.setFont(FONT_NAME_BOLD, size)
-            c.setFillColor(colors.black)
-            wrapped = _wrap_text_to_width(c, _ar(text), FONT_NAME_BOLD, size, max_text_width)
-            line_height = size * 1.5
-            for wrapped_line in wrapped:
-                c.drawCentredString(PAGE_W / 2, y, wrapped_line)
-                y -= line_height * 0.3528 * mm / mm
-        c.setFillColor(colors.black)
-        y -= 4 * mm
+        y = _draw_intro_banner(c, y, extra_intro_lines)
 
     by_day = {}
     for day, start_min, name, s in all_sessions:
@@ -128,65 +275,36 @@ def _draw_sessions_body(c, y, all_sessions, extra_intro_lines=None):
     ordered_days = [d for d in sd.DAY_ORDER if d in by_day]
     if not ordered_days:
         c.setFont(FONT_NAME, DETAIL_SIZE + 2)
+        c.setFillColor(colors.black)
         c.drawCentredString(PAGE_W / 2, y, _ar("لا توجد معلومات جدول للمواد المختارة."))
         return y
 
-    # تصميم أحادي اللون بالكامل: شريط يوم واحد أسود صلب لكل الأيام (لا
-    # تدرّج من الغامق للفاتح كما كان سابقًا)، وتظليل رمادي فاتح متناوب
-    # صلب (لا أزرق متدرّج) لتمييز الصفوف، مع إطار أسود رفيع حول كل حصة
-    # يضمن وضوحًا كاملاً حتى عند الطباعة بالأبيض والأسود.
+    # كل يوم يأخذ لونًا صلبًا مستقلًا خاصًا به (لا تدرّج بين الأيام)، تُستخدم
+    # الألوان كلمسات صغيرة فقط (دائرة الرقم، الخط الفاصل، الشريط الجانبي،
+    # شارة الوقت) بدل تلوين خلفيات كاملة، فتبقى الطباعة عملية واقتصادية.
     entry_idx = 0
-    for day in ordered_days:
+    for day_num, day in enumerate(ordered_days, start=1):
         sessions_today = sorted(by_day[day], key=lambda x: x[0])
-        needed_height = 12 * mm + len(sessions_today) * 16 * mm
+        needed_height = 14 * mm + len(sessions_today) * 16 * mm
         if y - needed_height < MARGIN:
             y = _new_page(c)
 
-        c.setFillColor(colors.black)
-        c.rect(LEFT_X, y - 9 * mm, CONTENT_W, 9 * mm, fill=1, stroke=0)
-        c.setFillColor(colors.white)
-        c.setFont(FONT_NAME_BOLD, DAY_HEADER_SIZE)
-        c.drawCentredString(PAGE_W / 2, y - 6.5 * mm, _ar(day))
-        y -= 13 * mm
-        c.setFillColor(colors.black)
+        day_color = _day_color(day)
+        y = _draw_day_header(c, y, day, day_num, day_color)
 
         for _, name, s in sessions_today:
             if y - 16 * mm < MARGIN:
                 y = _new_page(c)
-            activity = s["activity"]
-            time_range = f"{s['start']} - {s['end']}"
-            room = s["room"]
-            teacher = s["teacher"]
-
-            if entry_idx % 2 == 0:
-                c.setFillColor(colors.HexColor("#EFEFEF"))
-                c.rect(LEFT_X, y - 14 * mm, CONTENT_W, 13 * mm, fill=1, stroke=0)
-            c.setStrokeColor(colors.black)
-            c.setLineWidth(0.6)
-            c.rect(LEFT_X, y - 14 * mm, CONTENT_W, 13 * mm, fill=0, stroke=1)
-
-            c.setFillColor(colors.black)
-            c.setFont(FONT_NAME_BOLD, COURSE_NAME_SIZE)
-            c.drawRightString(RIGHT_X - 3 * mm, y - 5.5 * mm, _ar(name))
-            c.setFont(FONT_NAME_BOLD, DETAIL_SIZE)
-            c.drawString(LEFT_X + 3 * mm, y - 5.5 * mm, time_range)
-            detail_parts = [activity]
-            if room:
-                detail_parts.append(f"القاعة: {room}")
-            if teacher:
-                detail_parts.append(teacher)
-            detail_text = "  |  ".join(detail_parts)
-            c.setFont(FONT_NAME, DETAIL_SIZE - 1)
-            c.setFillColor(colors.HexColor("#333333"))
-            c.drawRightString(RIGHT_X - 3 * mm, y - 11 * mm, _ar(detail_text))
-            c.setFillColor(colors.black)
-            y -= 16 * mm
+            y = _draw_session_card(c, y, name, s, day_color, entry_idx)
             entry_idx += 1
         y -= 4 * mm
     return y
 
 
 def _draw_footer(c):
+    c.setStrokeColor(colors.HexColor(BRAND_ACCENT))
+    c.setLineWidth(0.6)
+    c.line(LEFT_X, MARGIN, RIGHT_X, MARGIN)
     c.setFont(FONT_NAME, 8)
     c.setFillColor(colors.HexColor("#888888"))
     c.drawCentredString(PAGE_W / 2, MARGIN / 2, _ar("تم إنشاء هذا الجدول تلقائيًا بواسطة بوت جدول IUST"))
@@ -199,11 +317,12 @@ def build_schedule_pdf(years_data, selected_list, output_path, student_name=None
     y = PAGE_H - HEADER_HEIGHT - 8 * mm
     c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
     c.drawCentredString(PAGE_W / 2, y, _ar("الجدول الدراسي الأسبوعي"))
-    y -= 10 * mm
-    c.setStrokeColor(colors.black)
-    c.setLineWidth(1)
-    c.line(LEFT_X, y, RIGHT_X, y)
-    y -= 8 * mm
+    y -= 7 * mm
+    accent_w = 26 * mm
+    c.setStrokeColor(colors.HexColor(BRAND_ACCENT))
+    c.setLineWidth(2.2)
+    c.line(PAGE_W / 2 - accent_w / 2, y, PAGE_W / 2 + accent_w / 2, y)
+    y -= 9 * mm
     all_sessions = []
     for year, code in selected_list:
         course = sd.get_course(years_data, year, code)
@@ -223,11 +342,12 @@ def build_optimized_schedule_pdf(chosen_options, output_path, stats_lines=None):
     y = PAGE_H - HEADER_HEIGHT - 8 * mm
     c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
     c.drawCentredString(PAGE_W / 2, y, _ar("الجدول المثالي المُقترَح"))
-    y -= 10 * mm
-    c.setStrokeColor(colors.black)
-    c.setLineWidth(1)
-    c.line(LEFT_X, y, RIGHT_X, y)
-    y -= 8 * mm
+    y -= 7 * mm
+    accent_w = 26 * mm
+    c.setStrokeColor(colors.HexColor(BRAND_ACCENT))
+    c.setLineWidth(2.2)
+    c.line(PAGE_W / 2 - accent_w / 2, y, PAGE_W / 2 + accent_w / 2, y)
+    y -= 9 * mm
     all_sessions = []
     for opt in chosen_options:
         for s in opt.sessions:
