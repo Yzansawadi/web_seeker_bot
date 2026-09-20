@@ -319,26 +319,9 @@ def build_schedule_pdf(years_data, selected_list, output_path, student_name=None
 
 
 def build_optimized_schedule_pdf(chosen_options, output_path, stats_lines=None):
-    _register_fonts()
-    c = canvas.Canvas(output_path, pagesize=A4)
-    _draw_header(c)
-    y = PAGE_H - HEADER_HEIGHT - 8 * mm
-    c.setFont(FONT_NAME_BOLD, TITLE_SIZE)
-    c.drawCentredString(PAGE_W / 2, y, _ar("الجدول المثالي المُقترَح"))
-    y -= 7 * mm
-    accent_w = 26 * mm
-    c.setStrokeColor(colors.HexColor(BRAND_ACCENT))
-    c.setLineWidth(2.2)
-    c.line(PAGE_W / 2 - accent_w / 2, y, PAGE_W / 2 + accent_w / 2, y)
-    y -= 9 * mm
-    all_sessions = []
-    for opt in chosen_options:
-        for s in opt.sessions:
-            all_sessions.append((s["day"], s["start_min"], opt.course_name, s))
-    intro = [(line, DETAIL_SIZE + 1) for line in stats_lines] if stats_lines else None
-    y = _draw_sessions_body(c, y, all_sessions, extra_intro_lines=intro)
-    _draw_footer(c)
-    c.save()
+    """ملف "الجدول المثالي": التصميم الكحلي الجديد في selected_schedule_pdf.py."""
+    import selected_schedule_pdf
+    selected_schedule_pdf.build_optimized_schedule_pdf(chosen_options, output_path, stats_lines)
 
 
 ###############################################################################

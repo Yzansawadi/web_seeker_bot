@@ -41,8 +41,9 @@ BLUE = colors.HexColor("#3A6EA5")        # العملي
 RING = colors.HexColor("#24467F")        # حلقة زخرفية خفيفة في الغلاف
 TINT = colors.HexColor("#EAF0F9")        # خلفية الشارات
 TINT_SOFT = colors.HexColor("#F5F8FC")   # خلفية صفوف الخريطة المتناوبة
-LINE = colors.HexColor("#C8D5E8")        # الحدود والخطوط الرفيعة
-SHADOW = colors.HexColor("#DDE5F2")      # ظل البطاقات
+LINE = colors.HexColor("#B0C1DA")        # خطوط الشبكة الداخلية
+BORDER = colors.HexColor("#6F89B3")      # حدود البطاقات والجداول (واضحة على الخلفية)
+SHADOW = colors.HexColor("#C3CEE2")      # ظل البطاقات
 MUTED = colors.HexColor("#5A6B85")       # نصوص ثانوية
 LIGHT_TEXT = colors.HexColor("#B9CCE8")  # نص فاتح فوق الكحلي
 GOLD = colors.HexColor("#C9A227")        # لمسة الهوية (خطوط رفيعة فقط)
@@ -65,6 +66,9 @@ DAY_HEADER_H = 10 * mm
 
 BRAND = "WebSeeker"
 TITLE = "الجدول الدراسي الأسبوعي"
+SUBTITLE = "جدول مخصص للمواد التي اخترتها"
+OPT_TITLE = "الجدول المثالي المقترح"
+OPT_SUBTITLE = "أفضل توزيع للشعب بأقل عدد أيام وأقل فراغات"
 
 OVERVIEW_MAX_H = 100 * mm
 OVERVIEW_LANE_HEIGHTS = (6.2 * mm, 5.4 * mm, 4.6 * mm)
@@ -182,14 +186,14 @@ def _draw_hero(c, stats):
 
     c.setFillColor(colors.white)
     c.setFont(pe.FONT_NAME_BOLD, 25)
-    c.drawCentredString(PAGE_W / 2, PAGE_H - 28 * mm, _ar(TITLE))
+    c.drawCentredString(PAGE_W / 2, PAGE_H - 28 * mm, _ar(getattr(c, "_ws_title", TITLE)))
 
     c.setFillColor(GOLD)
     c.rect(PAGE_W / 2 - 9 * mm, PAGE_H - 32 * mm, 18 * mm, 0.9 * mm, fill=1, stroke=0)
 
     c.setFillColor(LIGHT_TEXT)
     c.setFont(pe.FONT_NAME, 10.5)
-    c.drawCentredString(PAGE_W / 2, PAGE_H - 38 * mm, _ar("جدول مخصص للمواد التي اخترتها"))
+    c.drawCentredString(PAGE_W / 2, PAGE_H - 38 * mm, _ar(getattr(c, "_ws_subtitle", SUBTITLE)))
 
     _draw_stat_cards(c, band_bottom, stats)
 
@@ -214,8 +218,8 @@ def _draw_stat_cards(c, band_bottom, stats):
         c.setFillColor(SHADOW)
         c.roundRect(x_left + 0.7 * mm, bottom - 0.7 * mm, width, height, 2.2 * mm, fill=1, stroke=0)
         c.setFillColor(colors.white)
-        c.setStrokeColor(LINE)
-        c.setLineWidth(0.6)
+        c.setStrokeColor(BORDER)
+        c.setLineWidth(1.0)
         c.roundRect(x_left, bottom, width, height, 2.2 * mm, fill=1, stroke=1)
 
         c.setFillColor(GOLD)
@@ -238,7 +242,7 @@ def _draw_slim_header(c):
     _draw_brand(c, LEFT_X, PAGE_H - 9.6 * mm, 12)
     c.setFillColor(colors.white)
     c.setFont(pe.FONT_NAME_BOLD, 11)
-    c.drawRightString(RIGHT_X, PAGE_H - 9.4 * mm, _ar(TITLE))
+    c.drawRightString(RIGHT_X, PAGE_H - 9.4 * mm, _ar(getattr(c, "_ws_title", TITLE)))
 
 
 def _new_page(c):
@@ -350,10 +354,17 @@ def _draw_overview(c, y, plan):
         row_top -= row_h
 
     c.setStrokeColor(LINE)
-    c.setLineWidth(0.4)
+    c.setLineWidth(0.5)
     for hour in range(h0, h1 + 1):
         x = x_of(hour * 60)
         c.line(x, y - header_h, x, bottom)
+    c.setStrokeColor(BORDER)
+    c.setLineWidth(0.7)
+    sep_y = y - header_h
+    c.line(LEFT_X, sep_y, RIGHT_X, sep_y)
+    for _day, _placed, row_h in rows[:-1]:
+        sep_y -= row_h
+        c.line(LEFT_X, sep_y, RIGHT_X, sep_y)
     c.restoreState()
 
     # ترويسة الساعات
@@ -386,8 +397,8 @@ def _draw_overview(c, y, plan):
                                         block_top - block_h / 2 - 6.4 * 0.32, label)
         row_top -= row_h
 
-    c.setStrokeColor(LINE)
-    c.setLineWidth(0.7)
+    c.setStrokeColor(BORDER)
+    c.setLineWidth(1.1)
     c.roundRect(LEFT_X, bottom, CONTENT_W, total_h, 2.5 * mm, fill=0, stroke=1)
     return bottom - 8 * mm
 
@@ -423,10 +434,10 @@ def _draw_card(c, y, s):
 
     # ظل + جسم البطاقة
     c.setFillColor(SHADOW)
-    c.roundRect(LEFT_X + 0.6 * mm, bottom - 0.6 * mm, CONTENT_W, h, 2 * mm, fill=1, stroke=0)
+    c.roundRect(LEFT_X + 0.9 * mm, bottom - 0.9 * mm, CONTENT_W, h, 2 * mm, fill=1, stroke=0)
     c.setFillColor(colors.white)
-    c.setStrokeColor(LINE)
-    c.setLineWidth(0.6)
+    c.setStrokeColor(BORDER)
+    c.setLineWidth(1.0)
     c.roundRect(LEFT_X, bottom, CONTENT_W, h, 2 * mm, fill=1, stroke=1)
 
     # شريط جانبي بلون النشاط (مقصوص على زوايا البطاقة المستديرة)
@@ -510,8 +521,8 @@ def _draw_days(c, y, sessions):
 def _draw_empty_message(c, y):
     h = 18 * mm
     c.setFillColor(TINT)
-    c.setStrokeColor(LINE)
-    c.setLineWidth(0.6)
+    c.setStrokeColor(BORDER)
+    c.setLineWidth(1.0)
     c.roundRect(LEFT_X, y - h, CONTENT_W, h, 2.5 * mm, fill=1, stroke=1)
     c.setFillColor(NAVY_DARK)
     c.setFont(pe.FONT_NAME_BOLD, 12)
@@ -529,8 +540,8 @@ def _draw_missing_note(c, y, names):
         y = _new_page(c)
 
     c.setFillColor(TINT_SOFT)
-    c.setStrokeColor(LINE)
-    c.setLineWidth(0.6)
+    c.setStrokeColor(BORDER)
+    c.setLineWidth(1.0)
     c.roundRect(LEFT_X, y - h, CONTENT_W, h, 2.5 * mm, fill=1, stroke=1)
     c.setFillColor(GOLD)
     c.rect(RIGHT_X - 1.4 * mm, y - h + 2.5 * mm, 1.4 * mm, h - 5 * mm, fill=1, stroke=0)
@@ -553,8 +564,8 @@ def _draw_missing_note(c, y, names):
 
 def _draw_footer(c, page, total):
     y = 14 * mm
-    c.setStrokeColor(LINE)
-    c.setLineWidth(0.6)
+    c.setStrokeColor(BORDER)
+    c.setLineWidth(1.0)
     c.line(LEFT_X, y, RIGHT_X, y)
     c.setFillColor(GOLD)
     c.rect(PAGE_W / 2 - 9 * mm, y - 0.5 * mm, 18 * mm, 1 * mm, fill=1, stroke=0)
@@ -587,32 +598,41 @@ class _NumberedCanvas(canvas.Canvas):
         canvas.Canvas.save(self)
 
 
-# ---------------------------------------------------------------------------
-# الواجهة العامة
-# ---------------------------------------------------------------------------
+def _draw_info_banner(c, y, lines):
+    """صندوق ملخص (يُستخدم في الجدول المثالي لعرض عدد الأيام والفراغات)."""
+    inner_w = CONTENT_W - 12 * mm
+    wrapped = []
+    for line in lines:
+        wrapped.extend(_wrap(line, pe.FONT_NAME_BOLD, 10, inner_w))
+    line_h = 5.6 * mm
+    h = len(wrapped) * line_h + 6 * mm
+    c.setFillColor(TINT)
+    c.setStrokeColor(BORDER)
+    c.setLineWidth(1.0)
+    c.roundRect(LEFT_X, y - h, CONTENT_W, h, 2.5 * mm, fill=1, stroke=1)
+    c.setFillColor(GOLD)
+    c.rect(RIGHT_X - 1.4 * mm, y - h + 2.5 * mm, 1.4 * mm, h - 5 * mm, fill=1, stroke=0)
+    c.setFillColor(NAVY_DARK)
+    c.setFont(pe.FONT_NAME_BOLD, 10)
+    ty = y - 6.2 * mm
+    for line in wrapped:
+        c.drawRightString(RIGHT_X - 6 * mm, ty, line)
+        ty -= line_h
+    return y - h - 7 * mm
 
-def build_schedule_pdf(years_data, selected_list, output_path, student_name=None):
+
+def _make_item(s, name):
+    start_min = s["start_min"]
+    end_abs = sd.time_to_minutes(s["end"])
+    end_min = end_abs if start_min < end_abs < 24 * 60 else start_min + 120
+    item = dict(s)
+    item["name"] = name
+    item["end_min"] = end_min
+    return item
+
+
+def _render(output_path, sessions, courses_count, missing, title, subtitle, info_lines=None):
     pe._register_fonts()
-
-    sessions = []
-    courses_count = 0
-    missing = []
-    for year, code in selected_list:
-        course = sd.get_course(years_data, year, code)
-        if not course:
-            continue
-        courses_count += 1
-        if not course["sessions"]:
-            missing.append(course["name"])
-            continue
-        for s in course["sessions"]:
-            start_min = s["start_min"]
-            end_abs = sd.time_to_minutes(s["end"])
-            end_min = end_abs if start_min < end_abs < 24 * 60 else start_min + 120
-            item = dict(s)
-            item["name"] = course["name"]
-            item["end_min"] = end_min
-            sessions.append(item)
 
     known_day_sessions = [s for s in sessions if s["day"] in sd.DAY_ORDER]
     stats = {
@@ -622,11 +642,16 @@ def build_schedule_pdf(years_data, selected_list, output_path, student_name=None
     }
 
     c = _NumberedCanvas(output_path, pagesize=A4)
-    c.setTitle("الجدول الدراسي الأسبوعي - WebSeeker")
+    c._ws_title = title
+    c._ws_subtitle = subtitle
+    c.setTitle(f"{title} - WebSeeker")
     c.setAuthor("WebSeeker")
 
     _draw_hero(c, stats)
     y = PAGE_H - HERO_H - 18 * mm
+
+    if info_lines:
+        y = _draw_info_banner(c, y, info_lines)
 
     if not known_day_sessions:
         y = _draw_empty_message(c, y)
@@ -643,3 +668,35 @@ def build_schedule_pdf(years_data, selected_list, output_path, student_name=None
 
     c.showPage()
     c.save()
+
+
+# ---------------------------------------------------------------------------
+# الواجهات العامة
+# ---------------------------------------------------------------------------
+
+def build_schedule_pdf(years_data, selected_list, output_path, student_name=None):
+    """ملف "عرض الجدول": المواد التي اختارها الطالب."""
+    sessions, missing, courses_count = [], [], 0
+    for year, code in selected_list:
+        course = sd.get_course(years_data, year, code)
+        if not course:
+            continue
+        courses_count += 1
+        if not course["sessions"]:
+            missing.append(course["name"])
+            continue
+        for s in course["sessions"]:
+            sessions.append(_make_item(s, course["name"]))
+    _render(output_path, sessions, courses_count, missing, TITLE, SUBTITLE)
+
+
+def build_optimized_schedule_pdf(chosen_options, output_path, stats_lines=None):
+    """ملف "الجدول المثالي": نفس التصميم، بعنوان مختلف وصندوق ملخص."""
+    sessions = []
+    course_codes = set()
+    for opt in chosen_options:
+        course_codes.add(opt.course_code)
+        for s in opt.sessions:
+            sessions.append(_make_item(s, opt.course_name))
+    _render(output_path, sessions, len(course_codes), [], OPT_TITLE, OPT_SUBTITLE,
+            info_lines=stats_lines)
