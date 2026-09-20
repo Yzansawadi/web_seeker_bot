@@ -425,7 +425,7 @@ async def toggle_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- التحقق من وضع الصيانة (تمت الإضافة) ---
     if MAINTENANCE_MODE:
-        await update.message.reply_text("عذراً، البوت حالياً تحت الصيانة الدورية ⚙️ ولن يستجيب للأوامر. يرجى المحاولة لاحقاً.")
+        await update.message.reply_text("عذراً، البوت حالياً تحت الصيانة ولن يستجيب للأوامر. يرجى المحاولة لاحقاً.")
         return
     # -----------------------------------------
 
