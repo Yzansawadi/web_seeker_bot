@@ -674,19 +674,37 @@ def _worker_loop():
 def start():
     """يُستدعى مرة واحدة عند تشغيل البوت: يحمّل البيانات ويبدأ الخيط الخلفي."""
     global _worker
+    # سطر تشخيصي دائم (INFO، بغضّ النظر عن نجاح أو فشل أي شيء) -- يُطبع
+    # دومًا عند كل إقلاع، حتى نعرف فورًا من الـ Logs ما الذي تم ضبطه فعليًا
+    # دون الحاجة للتخمين لاحقًا إن اختفت رسائل التحذير بين سطور كثيرة.
+    logger.info(
+        "notifier: بدء التشغيل | إشعارات تيليغرام: %s | تخزين Upstash: %s | التوكن مضبوط: %s | "
+        "CHAT_ID مضبوط: %s | UPSTASH_URL مضبوط: %s",
+        "مُفعّلة" if _notify_enabled else "معطّلة",
+        "مُفعّل" if _storage_enabled else "معطّل (في الذاكرة فقط)",
+        bool(NOTIFIER_BOT_TOKEN), bool(NOTIFIER_CHAT_ID), bool(UPSTASH_URL),
+    )
     if _worker is not None and _worker.is_alive():
+        logger.info("notifier: الخيط الخلفي يعمل بالفعل، لن يُعاد تشغيله.")
         return
     if _storage_enabled:
+        loaded = False
         for attempt in range(3):
             if _try_load():
+                loaded = True
                 break
             time.sleep(2 * (attempt + 1))
+        if loaded:
+            logger.info("notifier: تم تحميل بيانات Upstash بنجاح عند الإقلاع (%s مستخدم).", len(_users))
         else:
             logger.error("سيُعاد تحميل البيانات تلقائيًا كل %s ثانية؛ التتبّع متوقف مؤقتًا "
                          "(لحماية بياناتك من الكتابة فوقها بسجلات فارغة).", LOAD_RETRY_INTERVAL)
+    else:
+        logger.info("notifier: التخزين الدائم معطّل، سيبدأ التتبّع في الذاكرة فورًا (_ready=%s).", _ready)
     _stop_event.clear()
     _worker = threading.Thread(target=_worker_loop, name="notifier-worker", daemon=True)
     _worker.start()
+    logger.info("notifier: تم تشغيل الخيط الخلفي (notifier-worker).")
 
 
 def shutdown():
