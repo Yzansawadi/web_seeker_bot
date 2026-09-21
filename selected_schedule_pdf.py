@@ -12,6 +12,12 @@ selected_schedule_pdf.py
 الهوية البصرية: كحلي (Navy) + لمسة ذهبية رفيعة جدًا. النظري بالكحلي الغامق،
 والعملي بأزرق أفتح، ليُميَّز النوع بصريًا من النظرة الأولى.
 
+اسم العلامة: كلمة "WebSeeker" بخط Orbitron بحجم واضح (أو الخط العربي
+الغامق كحل بديل إن لم يُرفَع ملف الخط بعد، انظر pdf_export.brand_font_name)،
+مع عبارة "by yazan alsawadi" بخط Comfortaa تحتها مباشرة بحجم أصغر دائمًا
+(نسبته ثابتة من حجم اسم العلامة)، في كل مكان تظهر فيه العلامة: الغلاف
+وترويسة كل صفحة لاحقة.
+
 عناصر التصميم:
     1) غلاف علوي كحلي بأشكال هندسية خفيفة، مع بطاقات إحصائية عائمة.
     2) خريطة أسبوعية (Timeline) تُظهر كل الأيام والساعات في نظرة واحدة.
@@ -58,13 +64,17 @@ RIGHT_X = PAGE_W - MARGIN
 CONTENT_W = PAGE_W - 2 * MARGIN
 
 HERO_H = 52 * mm
-SLIM_H = 15 * mm
+# ارتفاع ترويسة الصفحات اللاحقة: زيدَ من 15mm إلى 18mm ليتّسع بشكل مريح
+# لسطر "by yazan alsawadi" الإضافي تحت WebSeeker دون أي تلامس مع حافة
+# الترويسة السفلية.
+SLIM_H = 18 * mm
 BOTTOM_LIMIT = 17 * mm
 CARD_H = 17 * mm
 CARD_GAP = 3.2 * mm
 DAY_HEADER_H = 10 * mm
 
 BRAND = "WebSeeker"
+BRAND_SUB = "by yazan alsawadi"
 TITLE = "الجدول الدراسي الأسبوعي"
 SUBTITLE = "جدول مخصص للمواد التي اخترتها"
 OPT_TITLE = "الجدول المثالي المقترح"
@@ -140,13 +150,26 @@ def _hour_label(hour):
     return f"{hour % 12 or 12} {suffix}"
 
 
-def _draw_brand(c, x_left, baseline_y, size, color=colors.white):
+def _draw_brand(c, x_left, baseline_y, size, color=colors.white, sub_color=None):
+    """يرسم اسم العلامة WebSeeker بخط Orbitron (أو الخط العربي الغامق كحل
+    بديل مؤقت إن لم يُرفَع ملف الخط بعد -- انظر pdf_export.brand_font_name)
+    بحجم `size` الواضح، مع عبارة "by yazan alsawadi" بخط Comfortaa (أو
+    الخط العربي العادي كحل بديل) مباشرة تحته، بحجم أصغر دائمًا (42% من حجم
+    اسم العلامة تقريبًا) لضمان أن WebSeeker يبقى العنصر الأبرز بصريًا."""
+    brand_font = pe.brand_font_name()
     c.setFillColor(color)
-    c.setFont(pe.FONT_NAME_BOLD, size)
+    c.setFont(brand_font, size)
     c.drawString(x_left, baseline_y, BRAND)
-    w = pdfmetrics.stringWidth(BRAND, pe.FONT_NAME_BOLD, size)
+    w = pdfmetrics.stringWidth(BRAND, brand_font, size)
+
     c.setFillColor(GOLD)
     c.circle(x_left + w + 2.6 * mm, baseline_y + size * 0.32, 1.05 * mm, fill=1, stroke=0)
+
+    sub_font = pe.brand_sub_font_name()
+    sub_size = size * 0.42
+    c.setFillColor(sub_color if sub_color is not None else LIGHT_TEXT)
+    c.setFont(sub_font, sub_size)
+    c.drawString(x_left, baseline_y - size * 0.62, BRAND_SUB)
 
 
 # ---------------------------------------------------------------------------
