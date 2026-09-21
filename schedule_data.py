@@ -48,17 +48,18 @@ ACTIVITY_EN = {
 
 
 def _time_to_minutes(t):
-    """Convert '8:00 AM' / '12:00 PM' style string to minutes-since-midnight for sorting."""
+    """Parse 12/24-hour times; unknown or invalid times sort last."""
     if not t:
         return 24 * 60  # unknown times sort last
-    m = re.match(r"(\d{1,2}):(\d{2})\s*([AP]M)", t.strip(), re.I)
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::00)?\s*([AP]M)?", str(t).strip(), re.I)
     if not m:
         return 24 * 60
-    h, mins, ampm = int(m.group(1)), int(m.group(2)), m.group(3).upper()
-    if ampm == "AM":
-        h = 0 if h == 12 else h
-    else:
-        h = 12 if h == 12 else h + 12
+    h, mins = int(m.group(1)), int(m.group(2))
+    ampm = (m.group(3) or "").upper()
+    if mins > 59 or (ampm and not 1 <= h <= 12) or (not ampm and h > 23):
+        return 24 * 60
+    if ampm:
+        h = h % 12 + (12 if ampm == "PM" else 0)
     return h * 60 + mins
 
 
@@ -71,10 +72,12 @@ def _split_days(days_field):
     The scraper sometimes stores more than one day in a single cell,
     e.g. 'الثلاثاء / السبت'. Split that into a clean list of individual days.
     """
-    if not days_field:
+    if pd.isna(days_field) or not days_field:
         return []
     parts = [d.strip() for d in str(days_field).split("/")]
-    return [p for p in parts if p]
+    aliases = {"الاحد": "الأحد", "الإثنين": "الاثنين", "الاربعاء": "الأربعاء"}
+    aliases.update({english.lower(): arabic for arabic, english in DAY_EN.items()})
+    return list(dict.fromkeys(aliases.get(p.lower(), p) for p in parts if p))
 
 
 def _load_courses_uncached():
@@ -92,6 +95,7 @@ def _load_courses_uncached():
                     "start": "8:00 AM",
                     "end": "12:00 PM",
                     "start_min": int,
+                    "end_min": int,
                     "room": str,
                     "section": str,
                     "teacher": str,
@@ -177,13 +181,14 @@ def _load_courses_uncached():
         section = str(row["section"]).strip() if pd.notna(row["section"]) else ""
         teacher = str(row["teacher"]).strip() if pd.notna(row["teacher"]) else ""
 
-        for day in _split_days(row["days"]):
+        for day in _split_days(row["days"]) or [""]:
             course["sessions"].append({
                 "day": day,
                 "activity": activity,
                 "start": start,
                 "end": end,
                 "start_min": _time_to_minutes(start),
+                "end_min": _time_to_minutes(end),
                 "room": room,
                 "section": section,
                 "teacher": teacher,

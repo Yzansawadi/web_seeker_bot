@@ -624,22 +624,29 @@ async def run_update_schedule(query, context):
 def build_optimized_status_text(result):
     if result["timed_out"] and not result["schedules"]:
         return (
-            "انتهى وقت المعالجة قبل إيجاد جدول مثالي.\n"
-            "جرّب اختيار عدد أقل من المواد للحصول على نتيجة أسرع."
+            "انتهت مهلة البحث قبل إيجاد جدول؛ لم يثبت وجود حل أو استحالته.\n"
+            "حاول مجددًا أو جرّب اختيار عدد أقل من المواد للحصول على نتيجة أسرع."
         )
 
     no_data = result.get("no_data_courses", [])
     if no_data:
         return (
             "لا توجد معلومات جدول كافية لإنشاء جدول مثالي.\n"
-            "المواد التالية بدون معلومات أوقات: " + "، ".join(no_data)
+            "المواد التالية بدون معلومات أوقات مكتملة وصالحة: " + "، ".join(no_data)
         )
     return "لم يتمكن النظام من إيجاد أي جدول ممكن للمواد المختارة."
 
 
 def build_optimized_summary_text(result):
     best = result["schedules"][0]
-    lines = ["تم إنشاء الجدول المثالي بنجاح."]
+    if not result.get("optimal_proven", False):
+        lines = ["تم إيجاد جدول بدون تعارض، لكن انتهت مهلة البحث قبل إثبات أنه الأفضل."]
+    elif result["excluded_courses"]:
+        lines = ["تعذّر جمع كل المواد؛ هذا أفضل جدول لأكبر عدد ممكن من المواد ذات الأوقات الصالحة."]
+    elif result.get("no_data_courses"):
+        lines = ["تم إيجاد أفضل جدول للمواد ذات معلومات الأوقات المكتملة."]
+    else:
+        lines = ["تم إيجاد أفضل جدول وإثبات أقل عدد أيام ثم أقل مجموع فراغات."]
     lines.append(f"عدد أيام الحضور: {best['days_count']}")
 
     if best["total_gap_minutes"] == 0:
@@ -649,15 +656,24 @@ def build_optimized_summary_text(result):
 
     if result["excluded_courses"]:
         excluded_names = "، ".join(e["name"] for e in result["excluded_courses"])
-        lines.append(f"تعذّر تضمين المواد التالية بسبب تعارض حتمي: {excluded_names}")
+        lines.append(f"مواد لم تُدرج في هذا الجدول: {excluded_names}")
+        if not result.get("optimal_proven", False):
+            lines.append("لم يثبت أن عدد المواد المدرجة هو الأكبر الممكن.")
 
     if result.get("no_data_courses"):
         lines.append(
-            "مواد بدون معلومات أوقات (لم تُدرَج في الجدول): "
+            "مواد بدون معلومات أوقات مكتملة وصالحة (لم تُدرَج في الجدول): "
             + "، ".join(result["no_data_courses"])
         )
 
-    lines.append("التفاصيل الكاملة مرفقة في ملف PDF أدناه.")
+    if len(result["schedules"]) > 1:
+        lines.append(
+            f"عدد البدائل المشابهة: {len(result['schedules']) - 1}؛ نفس الأيام والفراغات، "
+            "مع اختلاف موعد نشاط واحد بحد أقصى 15 دقيقة."
+        )
+        lines.append("الجدول الأفضل أولًا، ثم البدائل في ملفات PDF منفصلة أدناه.")
+    else:
+        lines.append("التفاصيل الكاملة مرفقة في ملف PDF أدناه.")
     return "\n".join(lines)
 
 
@@ -721,7 +737,7 @@ async def optimize_schedule(query, context):
             opt.find_best_schedules,
             years_data, selected_snapshot,
             sd.get_course, sd.time_to_minutes,
-            top_n=1, time_budget_seconds=8.0,
+            top_n=3, time_budget_seconds=8.0,
         )
     except Exception:
         logger.exception("خطأ في محرك التحسين")
@@ -740,22 +756,35 @@ async def optimize_schedule(query, context):
         result_text = build_optimized_status_text(result)
     await context.bot.send_message(chat_id=query.message.chat_id, text=result_text)
 
-    if result["schedules"]:
-        best = result["schedules"][0]
+    for index, schedule in enumerate(result["schedules"]):
         os.makedirs(TEMP_DIR, exist_ok=True)
-        pdf_path = os.path.join(TEMP_DIR, f"optimal_{user_id}.pdf")
+        pdf_path = os.path.join(TEMP_DIR, f"optimal_{user_id}_{index}.pdf")
+        if index:
+            label = f"بديل مشابه {index}"
+        elif result.get("optimal_proven", False):
+            label = "الجدول الأفضل"
+        else:
+            label = "أفضل جدول عُثر عليه حتى انتهاء المهلة (غير مثبت الأمثلية)"
         try:
-            stats_lines = [f"عدد أيام الحضور: {best['days_count']}  |  مجموع الفراغات: {best['total_gap_minutes']} دقيقة"]
+            stats_lines = [
+                label,
+                f"عدد أيام الحضور: {schedule['days_count']}  |  مجموع الفراغات: {schedule['total_gap_minutes']} دقيقة",
+            ]
             if result["excluded_courses"]:
                 excl = "، ".join(e["name"] for e in result["excluded_courses"])
                 stats_lines.append(f"مواد مستثناة: {excl}")
-            pdf_export.build_optimized_schedule_pdf(best["options"], pdf_path, stats_lines=stats_lines)
+            if result.get("no_data_courses"):
+                stats_lines.append("مواد بدون أوقات صالحة: " + "، ".join(result["no_data_courses"]))
+            await asyncio.to_thread(
+                pdf_export.build_optimized_schedule_pdf,
+                schedule["options"], pdf_path, stats_lines=stats_lines,
+            )
             with open(pdf_path, "rb") as f:
                 await context.bot.send_document(
                     chat_id=query.message.chat_id,
                     document=f,
-                    filename="webseeker_schedule.pdf",
-                    caption="الجدول المثالي بصيغة PDF",
+                    filename="webseeker_schedule.pdf" if index == 0 else f"webseeker_alternative_{index}.pdf",
+                    caption=f"{label} بصيغة PDF",
                 )
         except Exception:
             logger.exception("فشل إنشاء أو إرسال PDF الجدول المثالي")
