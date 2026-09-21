@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-schedule_optimizer.py - optimized exact/anytime scheduler
+schedule_optimizer.py - exact branch-and-bound scheduler
 -----------------------------------------------------------
 Drop-in replacement for the original schedule_optimizer.py API.
 
@@ -16,14 +16,17 @@ Main improvements over the original engine:
    removed immediately.
 5. Strong day-count lower bound using an exact DP over the (normally <= 7)
    teaching days.
-6. Lexicographic branch-and-bound on:
-       fewer days -> fewer gaps -> earlier starts.
+6. Lexicographic branch-and-bound: fewer days, fewer gaps, then earlier starts
+   as a deterministic tie-breaker. Safe bounds include unfillable idle minutes.
 7. Exact maximal-subset search when no complete timetable exists. It optimizes
    the schedule among all subsets with the maximum possible number of courses,
    rather than returning the first feasible subset.
-8. Optional anytime time limit. If time expires, the best solution found so far
+8. One monotonic deadline including bundle preparation. If time expires, the best solution found so far
    is returned honestly with timed_out=True. If the search finishes, the result
-   is marked optimal_proven=True.
+   is marked optimal_proven=True. Pass time_budget_seconds=None for exact search
+   without a deadline.
+9. Only after proving the optimum, return at most top_n timetables with identical
+   days/gaps and at most one activity shifted by up to 15 minutes.
 
 The public function find_best_schedules(...) keeps the original signature.
 """
@@ -32,7 +35,6 @@ from __future__ import annotations
 
 import time as _time
 from dataclasses import dataclass, field
-from itertools import product
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +105,16 @@ def _canonical_day(day):
     return _DAY_ALIASES.get(text.lower(), text)
 
 
+def _option_signature(option):
+    return (
+        option.activity,
+        tuple(sorted(
+            (_canonical_day(s["day"]), s["start_min"], s["start_min"] + _duration(s))
+            for s in option.sessions
+        )),
+    )
+
+
 def _build_day_index(variables):
     seen = set()
     for var in variables:
@@ -136,13 +148,43 @@ def _duration(session):
 
 
 def _annotate_durations(variables, time_to_minutes_fn):
-    """Annotate session dicts once, matching the old module's behavior."""
+    """Reject incomplete sections rather than silently dropping their meetings."""
+    invalid_codes = set()
+    invalid_names = []
     for var in variables:
+        valid_options = []
         for opt in var.options:
+            sessions = []
+            seen = set()
             for s in opt.sessions:
-                if "duration_min" not in s:
-                    end_abs = time_to_minutes_fn(s["end"])
-                    s["duration_min"] = max(0, end_abs - int(s["start_min"]))
+                start = time_to_minutes_fn(s["start"]) if "start" in s else s.get("start_min")
+                end = time_to_minutes_fn(s["end"]) if "end" in s else s.get("end_min")
+                if (
+                    _canonical_day(s.get("day", "")) not in _DAY_ORDER
+                    or not isinstance(start, int)
+                    or not isinstance(end, int)
+                    or not 0 <= start < end < 24 * 60
+                    or not str(s.get("activity", "")).strip()
+                    or str(s.get("activity", "")).strip().lower() == "nan"
+                ):
+                    break
+                s["start_min"], s["end_min"] = start, end
+                s["duration_min"] = end - start
+                key = (_canonical_day(s["day"]), start, end, s.get("room", ""), s.get("teacher", ""))
+                if key not in seen:
+                    seen.add(key)
+                    sessions.append(s)
+            else:
+                if sessions:
+                    opt.sessions = sessions
+                    valid_options.append(opt)
+        var.options = valid_options
+        if not valid_options:
+            invalid_codes.add(var.course_code)
+            if var.course_name not in invalid_names:
+                invalid_names.append(var.course_name)
+    variables[:] = [v for v in variables if v.course_code not in invalid_codes]
+    return invalid_names
 
 
 # ---------------------------------------------------------------------------
@@ -154,10 +196,15 @@ def build_variables(years_data, selected_list, get_course_fn):
     """Build the old-style (course × activity) variables."""
     variables = []
     no_data_courses = []
+    seen_codes = set()
 
     for year, code in selected_list:
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
         course = get_course_fn(years_data, year, code)
         if course is None:
+            no_data_courses.append(str(code))
             continue
         if not course.get("sessions"):
             no_data_courses.append(course["name"])
@@ -165,9 +212,11 @@ def build_variables(years_data, selected_list, get_course_fn):
 
         by_activity = {}
         for s in course["sessions"]:
-            by_activity.setdefault(s["activity"], {}).setdefault(s["section"], []).append(s)
+            activity = str(s.get("activity", "")).strip()
+            section = str(s.get("section", "")).strip()
+            by_activity.setdefault(activity, {}).setdefault(section, []).append(dict(s))
 
-        for activity, sections in by_activity.items():
+        for activity, sections in sorted(by_activity.items()):
             options = [
                 SectionOption(
                     course_code=code,
@@ -176,7 +225,7 @@ def build_variables(years_data, selected_list, get_course_fn):
                     section_id=section_id,
                     sessions=list(sessions_list),
                 )
-                for section_id, sessions_list in sections.items()
+                for section_id, sessions_list in sorted(sections.items())
             ]
             variables.append(
                 Variable(
@@ -199,9 +248,9 @@ def _section_day_masks(option, day_index):
         start = int(s["start_min"])
         duration = _duration(s)
         # Python arbitrary-precision integers make minute occupancy extremely cheap.
-        if duration <= 0:
-            continue
         bits = ((1 << duration) - 1) << start
+        if result.get(idx, 0) & bits:
+            return None
         result[idx] = result.get(idx, 0) | bits
         earliest[idx] = min(earliest.get(idx, start), start)
     return result, earliest
@@ -216,7 +265,7 @@ def _merge_masks(a, b):
     return True
 
 
-def _make_course_bundles(vars_for_course, day_index):
+def _make_course_bundles(vars_for_course, day_index, state=None):
     """Cartesian-product the activities of one course with early conflict pruning."""
     # Most constrained activity first dramatically cuts intermediate products.
     activities = sorted(vars_for_course, key=lambda v: len(v.options))
@@ -226,12 +275,19 @@ def _make_course_bundles(vars_for_course, day_index):
     for var in activities:
         prepared = []
         for opt in var.options:
-            masks, earliest = _section_day_masks(opt, day_index)
+            if state is not None and state.time_up():
+                return []
+            occupancy = _section_day_masks(opt, day_index)
+            if occupancy is None:
+                continue
+            masks, earliest = occupancy
             prepared.append((opt, masks, earliest))
 
         next_partials = []
         for chosen, used_masks, used_earliest, _meta in partials:
             for opt, opt_masks, opt_earliest in prepared:
+                if state is not None and state.time_up():
+                    return []
                 merged = dict(used_masks)
                 if not _merge_masks(merged, opt_masks):
                     continue
@@ -249,8 +305,10 @@ def _make_course_bundles(vars_for_course, day_index):
     bundles = []
     seen = set()
     for chosen, masks, earliest, _meta in partials:
+        if state is not None and state.time_up():
+            return []
         # Collapse exactly identical occupied timetables for the same course.
-        signature = tuple(sorted(masks.items()))
+        signature = tuple(sorted(_option_signature(opt) for opt in chosen))
         if signature in seen:
             continue
         seen.add(signature)
@@ -358,18 +416,10 @@ def _lower_bound_score(domains, busy_by_day):
     There are normally only 7 teaching days, so we can exactly enumerate all
     reachable unions of day masks while deliberately ignoring time conflicts.
     This produces a strong lower bound on the minimum possible day count and a
-    safe optimistic lower bound on earliness. Gap lower bound is always 0.
+    safe optimistic lower bound on earliness and on unfillable existing gaps.
     """
     if not domains:
-        days = len(busy_by_day)
-        earliest = 0
-        # Existing sessions determine the earliest start of each used day.
-        for domain_day, _mask in busy_by_day.items():
-            # The exact start is not recoverable from the occupancy mask alone
-            # without scanning bits. Do that only for the <=7 days in the bound.
-            bit = _lowest_set_bit_index(_mask)
-            earliest += bit
-        return (days, 0, earliest)
+        return _score_masks(busy_by_day)
 
     reachable = {sum(1 << d for d in busy_by_day)}
     for domain in domains:
@@ -391,10 +441,19 @@ def _lower_bound_score(domains, busy_by_day):
         current_earliest[day_idx] = _lowest_set_bit_index(mask)
 
     possible_earliest = {}
+    possible_busy = {}
     for domain in domains:
         for bundle in domain:
             for day_idx, start in bundle.earliest_by_day:
                 possible_earliest[day_idx] = min(possible_earliest.get(day_idx, start), start)
+            for day_idx, mask in bundle.day_masks:
+                possible_busy[day_idx] = possible_busy.get(day_idx, 0) | mask
+
+    gap_bound = 0
+    for day_idx, mask in busy_by_day.items():
+        first = _lowest_set_bit_index(mask)
+        span = ((1 << (mask.bit_length() - first)) - 1) << first
+        gap_bound += (span & ~(mask | possible_busy.get(day_idx, 0))).bit_count()
 
     best_lb = None
     for final_mask in reachable:
@@ -406,12 +465,12 @@ def _lower_bound_score(domains, busy_by_day):
             if not (final_mask & (1 << day_idx)):
                 continue
             if day_idx in current_earliest:
-                early += current_earliest[day_idx]
+                early += min(current_earliest[day_idx], possible_earliest.get(day_idx, 24 * 60))
             else:
                 # If a day is introduced only by a future bundle, an optimistic
                 # lower bound is the smallest start of any bundle that can use it.
                 early += possible_earliest.get(day_idx, 0)
-        candidate = (days, 0, early)
+        candidate = (days, gap_bound, early)
         if best_lb is None or candidate < best_lb:
             best_lb = candidate
 
@@ -423,6 +482,15 @@ def _lowest_set_bit_index(mask):
         return 0
     low = mask & -mask
     return low.bit_length() - 1
+
+
+def _score_masks(busy_by_day):
+    earliest = sum(_lowest_set_bit_index(mask) for mask in busy_by_day.values())
+    gaps = sum(
+        mask.bit_length() - _lowest_set_bit_index(mask) - mask.bit_count()
+        for mask in busy_by_day.values()
+    )
+    return len(busy_by_day), gaps, earliest
 
 
 def _subset_day_lower_bound(domains, busy_by_day, need_more_courses):
@@ -466,9 +534,11 @@ def _subset_day_lower_bound(domains, busy_by_day, need_more_courses):
 
 
 class _SearchState:
-    def __init__(self, top_n, time_budget_seconds):
+    def __init__(self, top_n, time_budget_seconds, deadline=None):
         self.top_n = max(1, int(top_n))
-        self.deadline = _time.time() + max(0.01, float(time_budget_seconds))
+        self.deadline = deadline
+        if deadline is None and time_budget_seconds is not None:
+            self.deadline = _time.monotonic() + max(0.0, float(time_budget_seconds))
         self.best = []  # [(score_tuple, assignment)]
         self.nodes_explored = 0
         self.timed_out = False
@@ -478,7 +548,7 @@ class _SearchState:
         return not self.timed_out
 
     def time_up(self):
-        if _time.time() >= self.deadline:
+        if self.deadline is not None and _time.monotonic() >= self.deadline:
             self.timed_out = True
             return True
         return False
@@ -507,17 +577,15 @@ class _SearchState:
 def _static_degrees(domains):
     n = len(domains)
     degrees = [0] * n
+    possible_busy = []
+    for domain in domains:
+        masks = {}
+        for bundle in domain:
+            _add_bundle(bundle, masks)
+        possible_busy.append(masks)
     for i in range(n):
         for j in range(i + 1, n):
-            related = False
-            for a in domains[i]:
-                if related:
-                    break
-                for b in domains[j]:
-                    if not _bundles_compatible(a, b):
-                        related = True
-                        break
-            if related:
+            if any(mask & possible_busy[j].get(day, 0) for day, mask in possible_busy[i].items()):
                 degrees[i] += 1
                 degrees[j] += 1
     return degrees
@@ -566,11 +634,9 @@ def _filter_domains(domains, selected_idx, selected_bundle, busy_by_day, assigne
 
 
 def _branch_score_heuristic(bundle, busy_by_day):
-    existing_days = set(busy_by_day)
-    added_days = sum(1 for d, _ in bundle.day_masks if d not in existing_days)
-    earliest = min((s["start_min"] for s in bundle.sessions), default=10**9)
-    duration = sum(_duration(s) for s in bundle.sessions)
-    return (added_days, earliest, -duration)
+    merged = dict(busy_by_day)
+    _add_bundle(bundle, merged)
+    return _score_masks(merged)
 
 
 def _search_full(domains, state, assigned, assignment, busy_by_day, degrees):
@@ -588,7 +654,7 @@ def _search_full(domains, state, assigned, assignment, busy_by_day, degrees):
     worst = state.worst_best_score()
     if worst is not None:
         lower = _lower_bound_score(unassigned_domains, busy_by_day)
-        if lower > worst:
+        if lower >= worst:
             return
 
     idx, legal_count = _select_mrv_variable(domains, assigned, busy_by_day, degrees)
@@ -619,11 +685,10 @@ def _search_full(domains, state, assigned, assignment, busy_by_day, degrees):
         assigned[idx] = False
 
 
-def _run_search(bundled_courses, top_n, time_budget_seconds):
+def _run_search(bundled_courses, state):
     """Run the optimized full-course search."""
     domains = [list(domain) for _code, _name, domain in bundled_courses]
     degrees = _static_degrees(domains)
-    state = _SearchState(top_n=top_n, time_budget_seconds=time_budget_seconds)
     assigned = [False] * len(domains)
     _search_full(domains, state, assigned, [], {}, degrees)
     return state
@@ -636,12 +701,12 @@ def _run_search(bundled_courses, top_n, time_budget_seconds):
 
 def _selection_tiebreak(excluded_indices):
     """Prefer excluding later selected courses when all primary scores tie."""
-    return tuple(sorted(excluded_indices, reverse=True))
+    return tuple(-i for i in sorted(excluded_indices, reverse=True))
 
 
 class _SubsetState(_SearchState):
-    def __init__(self, time_budget_seconds, course_count):
-        super().__init__(top_n=1, time_budget_seconds=time_budget_seconds)
+    def __init__(self, deadline, course_count):
+        super().__init__(top_n=1, time_budget_seconds=None, deadline=deadline)
         self.course_count = course_count
         self.best_included = -1
         self.best_score = None
@@ -685,7 +750,7 @@ def _search_subset(
 
     remaining_indices = [i for i, flag in enumerate(assigned) if not flag]
     included_count = len(assignment)
-    optimistic_max = included_count + len(remaining_indices)
+    optimistic_max = included_count + sum(bool(domains[i]) for i in remaining_indices)
     if optimistic_max < state.best_included:
         return
 
@@ -695,7 +760,7 @@ def _search_subset(
         return
 
     need_for_best = max(0, state.best_included - included_count)
-    if state.best_included >= 0:
+    if state.best_score is not None and optimistic_max == state.best_included:
         remaining_domains = [domains[i] for i in remaining_indices]
         if need_for_best > 0:
             lb_days = _subset_day_lower_bound(remaining_domains, busy_by_day, need_for_best)
@@ -704,9 +769,8 @@ def _search_subset(
 
         # If even the optimistic day count is already worse than the best score
         # for the same achievable number of included courses, prune.
-        if included_count + len(remaining_indices) == state.best_included and state.best_score is not None:
-            if (lb_days, 0, 0) > state.best_score:
-                return
+        if (lb_days, 0, 0) > state.best_score:
+            return
 
     # Dynamic MRV including only currently includable bundles.
     idx = None
@@ -733,7 +797,6 @@ def _search_subset(
             assignment.append(bundle)
 
             filtered = list(domains)
-            ok = True
             for j, domain in enumerate(domains):
                 if assigned[j] or j == idx:
                     continue
@@ -807,6 +870,77 @@ def _course_name_for_bundles(bundled_courses, course_code):
     return course_code
 
 
+def _is_similar_bundle(best, candidate, max_shift_minutes=15):
+    reference = dict(_option_signature(opt) for opt in best.options)
+    alternative = dict(_option_signature(opt) for opt in candidate.options)
+    if reference.keys() != alternative.keys():
+        return False
+    changed = 0
+    for activity, sessions in reference.items():
+        other = alternative[activity]
+        if sessions == other:
+            continue
+        changed += 1
+        if changed > 1 or len(sessions) != len(other):
+            return False
+        for (day, start, end), (other_day, other_start, other_end) in zip(sessions, other):
+            if (
+                day != other_day
+                or end - start != other_end - other_start
+                or abs(start - other_start) > max_shift_minutes
+                or abs(end - other_end) > max_shift_minutes
+            ):
+                return False
+    return changed == 1
+
+
+def _nearby_schedules(best_assignment, bundled_courses, top_n, deadline):
+    best_score = _compute_score(best_assignment)
+    schedules = [(best_score, best_assignment)]
+    if top_n <= 1:
+        return schedules
+    domains = {code: bundles for code, _name, bundles in bundled_courses}
+    alternatives = []
+    for index, best_bundle in enumerate(best_assignment):
+        others = best_assignment[:index] + best_assignment[index + 1:]
+        busy = {}
+        for bundle in others:
+            _add_bundle(bundle, busy)
+        for candidate in domains[best_bundle.course_code]:
+            if deadline is not None and _time.monotonic() >= deadline:
+                return schedules + sorted(alternatives, key=lambda item: item[0])[:top_n - 1]
+            if not _is_similar_bundle(best_bundle, candidate):
+                continue
+            if _bundle_conflicts_busy(candidate, busy):
+                continue
+            assignment = best_assignment[:index] + [candidate] + best_assignment[index + 1:]
+            score = _compute_score(assignment)
+            if score[:2] == best_score[:2]:
+                alternatives.append((score, assignment))
+    return schedules + sorted(alternatives, key=lambda item: item[0])[:top_n - 1]
+
+
+def _result(solutions, excluded, no_data, state):
+    schedules = [
+        {
+            "score": score,
+            "days_count": score[0],
+            "total_gap_minutes": score[1],
+            "earliness_score": score[2],
+            "options": [option for bundle in bundles for option in bundle.options],
+        }
+        for score, bundles in solutions
+    ]
+    return {
+        "schedules": schedules,
+        "excluded_courses": excluded,
+        "no_data_courses": no_data,
+        "timed_out": state.timed_out,
+        "optimal_proven": state.optimal_proven,
+        "nodes_explored": state.nodes_explored,
+    }
+
+
 def find_best_schedules(
     years_data,
     selected_list,
@@ -815,95 +949,49 @@ def find_best_schedules(
     top_n=3,
     time_budget_seconds=4.0,
 ):
-    """Find the best timetable(s) while preserving the original API."""
-    variables, no_data_courses = build_variables(years_data, selected_list, get_course_fn)
-    if not variables:
-        return {
-            "schedules": [],
-            "excluded_courses": [],
-            "no_data_courses": no_data_courses,
-            "timed_out": False,
-            "optimal_proven": True,
-            "nodes_explored": 0,
-        }
+    """Optimize all courses first; use a maximum feasible subset only if impossible.
 
-    _annotate_durations(variables, time_to_minutes_fn)
+    top_n is a cap, not a quota. Alternatives must have identical days and gaps,
+    with only one activity shifted by at most 15 minutes on the same weekdays.
+    Earlier daily starts break primary-score ties deterministically.
+    A finite budget can return an unproven incumbent; None requests exact search.
+    """
+    state = _SearchState(top_n=1, time_budget_seconds=time_budget_seconds)
+    variables, no_data_courses = build_variables(years_data, selected_list, get_course_fn)
+    no_data_courses.extend(_annotate_durations(variables, time_to_minutes_fn))
+    if state.time_up():
+        return _result([], [], no_data_courses, state)
+    if not variables:
+        return _result([], [], no_data_courses, state)
+
     day_index = _build_day_index(variables)
 
     grouped = _group_variables_by_course(variables)
     bundled_courses = []
     for code, course_vars in grouped:
-        bundles = _make_course_bundles(course_vars, day_index)
-        if bundles:
-            bundled_courses.append((code, course_vars[0].course_name, bundles))
-        else:
-            # If theory/practical combinations are internally impossible, the
-            # course behaves like an impossible course in the maximal-subset pass.
-            bundled_courses.append((code, course_vars[0].course_name, []))
+        bundles = _make_course_bundles(course_vars, day_index, state)
+        if state.timed_out:
+            return _result([], [], no_data_courses, state)
+        bundled_courses.append((code, course_vars[0].course_name, bundles))
 
-    if not bundled_courses:
-        return {
-            "schedules": [],
-            "excluded_courses": [],
-            "no_data_courses": no_data_courses,
-            "timed_out": False,
-            "optimal_proven": True,
-            "nodes_explored": 0,
-        }
-
-    deadline = _time.time() + max(0.01, float(time_budget_seconds))
-
-    # Remove impossible courses from the full search immediately; the subset
-    # engine will still account for them in excluded_courses.
     full_domains = [d for _code, _name, d in bundled_courses]
     full_possible = all(bool(d) for d in full_domains)
 
-    state = None
-    excluded_codes = set()
-
     if full_possible:
-        remaining = max(0.01, deadline - _time.time())
-        state = _run_search(bundled_courses, top_n=top_n, time_budget_seconds=remaining)
-        if state.best:
-            kept_courses = bundled_courses
-        else:
-            kept_courses = None
-    else:
-        kept_courses = None
-
-    # If a complete schedule was found, it is already optimal when the search
-    # finished; if time expired, it is the best found so far.
-    if kept_courses is not None:
-        schedules = []
-        for score, bundles in state.best:
-            flat_options = []
-            for bundle in bundles:
-                flat_options.extend(bundle.options)
-            schedules.append(
-                {
-                    "score": score,
-                    "days_count": score[0],
-                    "total_gap_minutes": score[1],
-                    "earliness_score": score[2],
-                    "options": flat_options,
-                }
-            )
-
-        return {
-            "schedules": schedules,
-            "excluded_courses": [],
-            "no_data_courses": no_data_courses,
-            "timed_out": state.timed_out,
-            "optimal_proven": not state.timed_out,
-            "nodes_explored": state.nodes_explored,
-        }
+        _run_search(bundled_courses, state)
+    if state.timed_out:
+        return _result(state.best, [], no_data_courses, state)
+    if state.best:
+        solutions = _nearby_schedules(state.best[0][1], bundled_courses, max(1, int(top_n)), state.deadline)
+        return _result(solutions, [], no_data_courses, state)
 
     # No complete solution: optimize over all subsets, primarily maximizing
     # the number of included courses, then timetable quality.
     subset_domains = [list(d) for _code, _name, d in bundled_courses]
     subset_names = [name for _code, name, _d in bundled_courses]
     degrees = _static_degrees([d if d else [] for d in subset_domains])
-    subset_state = _SubsetState(max(0.01, deadline - _time.time()), len(subset_domains))
+    subset_state = _SubsetState(state.deadline, len(subset_domains))
+    subset_state.nodes_explored = state.nodes_explored
     assigned = [False] * len(subset_domains)
     excluded_idx = set()
     _search_subset(
@@ -918,51 +1006,30 @@ def find_best_schedules(
     )
 
     if subset_state.best_assignment is None:
-        return {
-            "schedules": [],
-            "excluded_courses": [],
-            "no_data_courses": no_data_courses,
-            "timed_out": subset_state.timed_out,
-            "optimal_proven": not subset_state.timed_out,
-            "nodes_explored": subset_state.nodes_explored,
-        }
+        return _result([], [], no_data_courses, subset_state)
 
     bundles_solution = subset_state.best_assignment
-    flat_options = []
     kept_codes = {b.course_code for b in bundles_solution}
-    for bundle in bundles_solution:
-        flat_options.extend(bundle.options)
 
-    score = _compute_score(bundles_solution)
-    schedules = [
-        {
-            "score": score,
-            "days_count": score[0],
-            "total_gap_minutes": score[1],
-            "earliness_score": score[2],
-            "options": flat_options,
-        }
-    ]
+    solutions = []
+    if bundles_solution:
+        solutions = [(_compute_score(bundles_solution), bundles_solution)]
+        if subset_state.optimal_proven:
+            solutions = _nearby_schedules(bundles_solution, bundled_courses, max(1, int(top_n)), state.deadline)
 
     excluded = []
     for code, name, domain in bundled_courses:
         if code not in kept_codes:
             reason = (
-                "لم توجد تركيبة خالية من التعارض تشمل هذه المادة ضمن أكبر مجموعة "
-                "ممكنة من المواد المختارة، وفق البحث الكامل المتاح"
+                "لم تُدرج هذه المادة في أكبر مجموعة متوافقة؛ يمكن تجربة استبدال مواد أخرى بها"
             )
             if not domain:
                 reason = "لا توجد تركيبة نظرية/عملية داخلية خالية من التعارض لهذه المادة"
+            elif subset_state.timed_out:
+                reason = "لم تُدرج في أفضل مجموعة عُثر عليها قبل انتهاء المهلة؛ لم يثبت استحالة تضمينها"
             excluded.append({"name": name, "reason": reason})
 
-    return {
-        "schedules": schedules,
-        "excluded_courses": excluded,
-        "no_data_courses": no_data_courses,
-        "timed_out": subset_state.timed_out,
-        "optimal_proven": not subset_state.timed_out,
-        "nodes_explored": subset_state.nodes_explored,
-    }
+    return _result(solutions, excluded, no_data_courses, subset_state)
 
 
 # Backward-compatible names used by the original module in tests/tools.
