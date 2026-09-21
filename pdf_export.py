@@ -16,34 +16,91 @@ FONTS_DIR = os.path.join(BASE_DIR, "fonts")
 FONT_NAME = "Arabic"
 FONT_NAME_BOLD = "Arabic-Bold"
 
+# خطوط العلامة (Brand fonts) الخاصة باسم WebSeeker وعبارة "by yazan alsawadi":
+# Orbitron لاسم WebSeeker نفسه (خط مستقبلي واضح يعطي حجمًا وهوية بصرية مميزة)،
+# وComfortaa لعبارة "by yazan alsawadi" الأصغر تحته مباشرة. كلا الاسمين
+# لاتينيان بالكامل، فلا حاجة لأي تشكيل عربي (arabic_text) عند رسمهما.
+ORBITRON_FONT_NAME = "Orbitron"
+COMFORTAA_FONT_NAME = "Comfortaa"
+
 _font_registered = False
+_orbitron_registered = False
+_comfortaa_registered = False
 
 
 def _register_fonts():
-    global _font_registered
+    """يسجّل الخط العربي (الإلزامي لعمل الملف أساسًا) بالإضافة لخطي العلامة
+    Orbitron و Comfortaa إن وُجد ملفاهما في مجلد fonts/ (اختياريان تمامًا:
+    غيابهما لا يُسقط الملف، فقط يُستخدَم الخط العربي الغامق/العادي كبديل
+    مؤقت لاسم العلامة وعبارة "by yazan alsawadi" حتى تُرفَع الملفات
+    الصحيحة). يكفي أن يحتوي اسم الملف على كلمة "orbitron" أو "comfortaa"
+    (بأي حالة أحرف) ليُكتشف تلقائيًا، دون أي ضبط إضافي مطلوب."""
+    global _font_registered, _orbitron_registered, _comfortaa_registered
     if _font_registered:
         return
+
     regular_path = None
     bold_path = None
+    orbitron_path = None
+    comfortaa_path = None
+
     if os.path.isdir(FONTS_DIR):
         for fname in os.listdir(FONTS_DIR):
             lower = fname.lower()
             if not lower.endswith(".ttf"):
                 continue
-            if "orbitron" in lower:
-                continue
             full = os.path.join(FONTS_DIR, fname)
+
+            if "orbitron" in lower:
+                if orbitron_path is None:
+                    orbitron_path = full
+                continue
+            if "comfortaa" in lower:
+                if comfortaa_path is None:
+                    comfortaa_path = full
+                continue
+
             if "bold" in lower and bold_path is None:
                 bold_path = full
             elif regular_path is None:
                 regular_path = full
+
     if regular_path is None:
         raise RuntimeError(f"لم يتم العثور على خط عربي داخل: {FONTS_DIR}")
     if bold_path is None:
         bold_path = regular_path
+
     pdfmetrics.registerFont(TTFont(FONT_NAME, regular_path))
     pdfmetrics.registerFont(TTFont(FONT_NAME_BOLD, bold_path))
+
+    if orbitron_path:
+        try:
+            pdfmetrics.registerFont(TTFont(ORBITRON_FONT_NAME, orbitron_path))
+            _orbitron_registered = True
+        except Exception:
+            _orbitron_registered = False
+
+    if comfortaa_path:
+        try:
+            pdfmetrics.registerFont(TTFont(COMFORTAA_FONT_NAME, comfortaa_path))
+            _comfortaa_registered = True
+        except Exception:
+            _comfortaa_registered = False
+
     _font_registered = True
+
+
+def brand_font_name():
+    """اسم الخط المُستخدم فعليًا لكلمة WebSeeker: Orbitron إن وُجد ملفه في
+    fonts/ (بعد استدعاء _register_fonts())، وإلا الخط العربي الغامق كحل
+    بديل مؤقت لا يُسقط الملف أبدًا."""
+    return ORBITRON_FONT_NAME if _orbitron_registered else FONT_NAME_BOLD
+
+
+def brand_sub_font_name():
+    """اسم الخط المُستخدم فعليًا لعبارة by yazan alsawadi: Comfortaa إن وُجد
+    ملفه في fonts/، وإلا الخط العربي العادي كحل بديل مؤقت."""
+    return COMFORTAA_FONT_NAME if _comfortaa_registered else FONT_NAME
 
 
 def _ar(text):
@@ -102,18 +159,26 @@ def _new_page(c):
 
 
 def _draw_header(c):
-    """رأس بسيط وأنيق: كلمة WebSeeker بخط أسود غامق أعلى اليسار مع نقطة
-    صغيرة بلون العلامة، وخط رفيع بلون العلامة يفصل الرأس عن المحتوى. بلا
-    أي شريط ملوّن ثقيل أو شعار، وبلا أي تدرّج لوني، فيبقى المظهر احترافيًا
-    واقتصاديًا عند الطباعة الفعلية."""
+    """رأس بسيط وأنيق: كلمة WebSeeker بخط Orbitron (أو الخط العربي الغامق
+    كحل بديل إن لم يُرفَع ملف الخط بعد) أعلى اليسار، مع عبارة
+    'by yazan alsawadi' بخط Comfortaa تحتها مباشرة بحجم أصغر واضح، ونقطة
+    صغيرة بلون العلامة، وخط رفيع بلون العلامة يفصل الرأس عن المحتوى."""
+    brand_font = brand_font_name()
+    sub_font = brand_sub_font_name()
+
     c.setFillColor(colors.black)
-    c.setFont(FONT_NAME_BOLD, BRAND_NAME_SIZE)
+    c.setFont(brand_font, BRAND_NAME_SIZE)
     text_baseline_y = PAGE_H - 10 * mm
     c.drawString(LEFT_X, text_baseline_y, BRAND_TEXT)
 
-    brand_w = pdfmetrics.stringWidth(BRAND_TEXT, FONT_NAME_BOLD, BRAND_NAME_SIZE)
+    brand_w = pdfmetrics.stringWidth(BRAND_TEXT, brand_font, BRAND_NAME_SIZE)
     c.setFillColor(colors.HexColor(BRAND_ACCENT))
     c.circle(LEFT_X + brand_w + 3 * mm, text_baseline_y + 1.6 * mm, 1.1 * mm, fill=1, stroke=0)
+
+    sub_size = BRAND_NAME_SIZE * 0.42
+    c.setFillColor(colors.HexColor("#666666"))
+    c.setFont(sub_font, sub_size)
+    c.drawString(LEFT_X, text_baseline_y - BRAND_NAME_SIZE * 0.62, "by yazan alsawadi")
 
     rule_y = PAGE_H - HEADER_HEIGHT
     c.setStrokeColor(colors.HexColor(BRAND_ACCENT))
