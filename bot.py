@@ -109,7 +109,6 @@ from telegram.ext import (
 import schedule_data as sd
 import pdf_export
 import notifier
-import notifier_admin
 import schedule_optimizer as opt
 
 try:
@@ -144,18 +143,8 @@ _last_update_ts = {"value": 0.0}
 
 EXTRACT_SCRIPT_TIMEOUT_SECONDS = 180
 
-# أنواع التحديثات التي يحتاجها هذا البوت فعليًا: رسائل نصية (الأوامر مثل
-# /start و/stats) وضغطات الأزرار (كل التنقّل والاختيار في البوت يعتمد
-# عليها). تُستخدَم صراحةً في كل استدعاء لـ setWebhook (انظر التعليق
-# التفصيلي أعلى الملف) بدل تركها فارغة.
 WEBHOOK_ALLOWED_UPDATES = ["message", "callback_query"]
-
-# كل كم ثانية تُعاد مهمة "تحديث تسجيل الـ webhook" الخلفية تلقائيًا،
-# كحماية ذاتية دائمة (انظر التعليق التفصيلي أعلى الملف، النقطة 3).
 WEBHOOK_SELF_HEAL_INTERVAL_SECONDS = 20 * 60
-
-# كل كم ثانية تُحدَّث رسالة لوحة الإحصائيات في شات الإشعارات.
-DASHBOARD_REFRESH_SECONDS = 60
 
 YEAR_NAMES = {
     1: "السنة الأولى",
@@ -165,53 +154,58 @@ YEAR_NAMES = {
     5: "السنة الخامسة",
 }
 
+# رابط الموقع الإلكتروني المرافق للبوت -- عدّل هذا لرابطك الفعلي
+SITE_URL = "https://your-site-name.onrender.com"
+
+def site_banner():
+    """شريط أنيق يظهر أعلى كل شاشة/قائمة في البوت."""
+    return f" جرّب الموقع الإلكتروني: {SITE_URL}\n{'─' * 30}\n\n"
+
 # ---------------------------------------------------------------------------
 # حالة كل مستخدم (في الذاكرة فقط، تُفقد عند إعادة تشغيل البوت)
 # ---------------------------------------------------------------------------
-# user_id -> {
-#     "selected": [ (year, code), ... ],   # المواد المختارة بترتيب اختيارها
-#     "mode": "show" | "optimize" | None,
-#     "stack": [ screen_descriptor, ... ], # مكدّس شاشات التنقّل (انظر أعلى الملف)
-# }
 user_sessions = {}
 
-# مستخدمون ظهروا منذ بدء هذه العملية — للـ logs المحلية فقط. ليست مصدر
-# الحقيقة عن "من جديد"، فذلك تقرره بيانات Redis الدائمة (انظر track_user).
 seen_users = set()
 _bot_start_time = datetime.now(timezone.utc)
 
-
 def track_user(user):
-    """نبضة متابعة تُرسَل عند كل تفاعل مع البوت (أمر أو ضغطة زر).
-
-    `seen_users` هنا للـ logs فقط. القرار الحقيقي "هل هذا مستخدم جديد؟" تتخذه
-    notifier.touch من Redis نفسه: إن وُجد سجل فُتح، وإن لم يوجد أُنشئ ورقمه
-    الدائم خُصّص. هذا يفرّق جوهريًا عن السلوك السابق الذي كان يعتبر كل من ليس
-    في `seen_users` جديدًا ويستدعي register_new_user — أي أن كل إعادة تشغيل على
-    Render كانت تمحو سجلات المستخدمين القدامى وعداداتهم.
-
-    الدالة idempotent وآمنة للاستدعاء المتكرر، وnotifier.touch تخنق كتابات
-    الحضور داخليًا (كل 20 ثانية لكل مستخدم) فلا تُشكّل هذه النبضات حملًا.
-    """
-    is_new_locally = user.id not in seen_users
+    is_new = user.id not in seen_users
     seen_users.add(user.id)
-    if is_new_locally:
-        logger.info("مستخدم بدأ استخدام البوت: %s (المعرف: %s)",
-                    user.full_name or user.username or str(user.id), user.id)
-    asyncio.create_task(
-        asyncio.to_thread(notifier.touch, user.id, user.username, user.full_name)
-    )
+    if is_new:
+        name = user.full_name or user.username or str(user.id)
+        logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين منذ آخر تشغيل: %s",
+                    name, user.id, len(seen_users))
+        asyncio.create_task(
+            asyncio.to_thread(notifier.register_new_user, user.id, user.username)
+        )
 
+# احتياط بالذاكرة فقط: يمنع تكرار الإعلان خلال عمر هذا التشغيل تحديدًا إن لم
+# يكن Upstash Redis مفعّلًا. مع تفعيل Redis، يُحفَظ القرار بشكل دائم في
+# notifier.py ولا يتكرر أبدًا حتى بعد إعادة التشغيل.
+_site_announced_locally = set()
 
-def _log_user_event(user_id, user, event_type, value=""):
-    """يسجّل حدثًا حقيقيًا (لا مجرد تنقّل) في نظام المتابعة.
-
-    يُطلَق كمهمة خلفية حتى لا ينتظر المستخدم أي طلب شبكي إلى Redis أو تيليغرام،
-    وحتى لا يُعطّل عطلٌ في خدمة خارجية استخدام البوت إطلاقًا.
-    """
-    asyncio.create_task(asyncio.to_thread(
-        notifier.log_event, user_id, user.username, event_type, value, user.full_name
-    ))
+async def maybe_announce_site(user_id, chat_id, context):
+    """يرسل إعلان الموقع الإلكتروني مرة واحدة فقط لكل مستخدم على الإطلاق،
+    مهما تكرر استخدامه للبوت بعد ذلك."""
+    already = await asyncio.to_thread(notifier.has_announced_site, user_id)
+    if already or user_id in _site_announced_locally:
+        return
+    
+    _site_announced_locally.add(user_id)
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "📢 خبر جديد!\n\n"
+                f"أصبح لدينا الآن موقع إلكتروني يمكنك تجربته:\n{SITE_URL}\n\n"
+                "جرّبه وأخبرنا برأيك!"
+            ),
+        )
+    except Exception:
+        logger.exception("فشل إرسال إعلان الموقع للمستخدم %s", user_id)
+        return
+    await asyncio.to_thread(notifier.mark_site_announced, user_id)
 
 
 def get_session(user_id):
@@ -227,23 +221,18 @@ def reset_session(user_id):
 
 
 # ---------------------------------------------------------------------------
-# مكدّس التنقّل: كل شاشة تُمثَّل بـ tuple بسيط (نوع الشاشة, معطياتها إن وُجدت)
+# مكدّس التنقّل
 # ---------------------------------------------------------------------------
-
 SCREEN_START = ("start",)
-
 
 def screen_selection(mode):
     return ("selection", mode)
 
-
 def screen_year(year):
     return ("year", year)
 
-
 def push_screen(session, descriptor):
     session.setdefault("stack", []).append(descriptor)
-
 
 def pop_screen(session):
     stack = session.setdefault("stack", [])
@@ -251,9 +240,7 @@ def pop_screen(session):
         return stack.pop()
     return SCREEN_START
 
-
 async def render_screen(query, context, user_id, descriptor):
-    """يرسم أي شاشة بناءً على وصفها (تُستخدم عند الرجوع أو القفز للرئيسية)."""
     session = get_session(user_id)
     kind = descriptor[0]
 
@@ -269,21 +256,15 @@ async def render_screen(query, context, user_id, descriptor):
         await show_year_courses(query, context, descriptor[1])
         return
 
-    # الافتراضي: الشاشة الرئيسية
     text, keyboard = start_text_and_keyboard()
     await query.edit_message_text(text, reply_markup=keyboard)
 
-
 async def go_back(query, context, user_id):
-    """يسحب آخر شاشة من المكدّس ويعرضها -- هذا هو منطق زر 'رجوع' الموحّد."""
     session = get_session(user_id)
     descriptor = pop_screen(session)
     await render_screen(query, context, user_id, descriptor)
 
-
 async def go_start(query, context, user_id):
-    """يصفّر مكدّس التنقّل ويعيد المستخدم للشاشة الرئيسية مباشرة، دون أي
-    تأثير على المواد المختارة (زر 'القائمة الرئيسية')."""
     session = get_session(user_id)
     session["stack"] = []
     text, keyboard = start_text_and_keyboard()
@@ -293,16 +274,13 @@ async def go_start(query, context, user_id):
 # ---------------------------------------------------------------------------
 # أدوات مساعدة
 # ---------------------------------------------------------------------------
-
 def schedule_file_exists():
     return os.path.exists(sd.SCHEDULE_PATH)
-
 
 def cooldown_remaining_seconds():
     elapsed = time.time() - _last_update_ts["value"]
     remaining = UPDATE_COOLDOWN_SECONDS - elapsed
     return max(0, int(remaining))
-
 
 def format_remaining(seconds):
     h, rem = divmod(seconds, 3600)
@@ -310,7 +288,6 @@ def format_remaining(seconds):
     if h > 0:
         return f"{h} ساعة و {m} دقيقة"
     return f"{m} دقيقة"
-
 
 def selected_courses_block(years_data, selected_list):
     if not selected_list:
@@ -322,22 +299,16 @@ def selected_courses_block(years_data, selected_list):
         lines.append(f"{i}. {name}")
     return "\n".join(lines) + "\n\n"
 
-
 # ---------------------------------------------------------------------------
 # بناء لوحات الأزرار
 # ---------------------------------------------------------------------------
-
 def nav_row():
-    """صف أزرار التنقّل الموحَّد: رجوع خطوة واحدة + قفز للرئيسية مباشرة.
-    يظهر في كل شاشة عدا الشاشة الرئيسية نفسها."""
     return [
         InlineKeyboardButton("رجوع", callback_data="back"),
         InlineKeyboardButton("القائمة الرئيسية", callback_data="go_start"),
     ]
 
-
 def build_start_keyboard():
-    """شاشة البداية (جذر التنقّل): زر التحديث + زرَي المسارين، بلا زر رجوع."""
     rows = []
     remaining = cooldown_remaining_seconds()
     if remaining <= 0:
@@ -350,15 +321,7 @@ def build_start_keyboard():
     rows.append([InlineKeyboardButton("عرض أوقات المواد فقط", callback_data="mode:show")])
     return InlineKeyboardMarkup(rows)
 
-
 def build_selection_keyboard(years_data, mode, has_selection):
-    """
-    شاشة الاختيار (السنوات + الأزرار الإضافية).
-
-    mode="show"  + لا اختيار: يظهر زر "إرسال أوقات جميع المواد PDF"
-    mode="show"  + يوجد اختيار: "عرض الجدول" + "حذف مادة"
-    mode="optimize" + يوجد اختيار: "توليد الجدول" + "حذف مادة"
-    """
     rows = []
 
     if mode == "show" and not has_selection:
@@ -383,7 +346,6 @@ def build_selection_keyboard(years_data, mode, has_selection):
     rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
-
 def build_delete_keyboard(years_data, selected_list):
     rows = []
     for year, code in selected_list:
@@ -393,7 +355,6 @@ def build_delete_keyboard(years_data, selected_list):
 
     rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
-
 
 def build_year_courses_keyboard(years_data, year, selected_codes, has_selection):
     rows = []
@@ -409,18 +370,14 @@ def build_year_courses_keyboard(years_data, year, selected_codes, has_selection)
     rows.append(nav_row())
     return InlineKeyboardMarkup(rows)
 
-
 # ---------------------------------------------------------------------------
 # أدوات تنسيق النصوص
 # ---------------------------------------------------------------------------
-
 def format_course_info(course):
     lines = [f"{course['name']}", f"الرمز: {course['code']}", ""]
-
     if not course["sessions"]:
         lines.append("لا تتوفر معلومات جدول لهذه المادة حتى الآن.")
         return "\n".join(lines)
-
     for s in course["sessions"]:
         room = f" | القاعة: {s['room']}" if s["room"] else ""
         teacher = f" | {s['teacher']}" if s["teacher"] else ""
@@ -428,22 +385,18 @@ def format_course_info(course):
             f"- {s['day']} — {s['activity']}\n"
             f"   {s['start']} – {s['end']}{room}{teacher}"
         )
-
     return "\n".join(lines)
-
 
 # ---------------------------------------------------------------------------
 # بناء نص ولوحة الشاشة الرئيسية / شاشة الاختيار
 # ---------------------------------------------------------------------------
-
 def start_text_and_keyboard(intro_note=""):
-    text = intro_note or "اختر ما تريد القيام به:"
+    text = site_banner() + (intro_note or "اختر ما تريد القيام به:")
     return text, build_start_keyboard()
-
 
 def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
     has_selection = len(selected_list) > 0
-    text = intro_note
+    text = site_banner() + intro_note
     text += selected_courses_block(years_data, selected_list)
 
     if not schedule_file_exists():
@@ -461,16 +414,15 @@ def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
 # ---------------------------------------------------------------------------
 # المعالجات (Handlers)
 # ---------------------------------------------------------------------------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user = update.effective_user
-    track_user(user)
-    _log_user_event(user_id, user, "start_command")
+    track_user(update.effective_user)
+    
+    asyncio.create_task(maybe_announce_site(user_id, update.message.chat_id, context))
+    
     reset_session(user_id)
     text, keyboard = start_text_and_keyboard(intro_note=" اهلا بك في بوت websseker. \n\n")
     await update.message.reply_text(text, reply_markup=keyboard)
-
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now(timezone.utc) - _bot_start_time
@@ -488,7 +440,6 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text)
 
-
 async def show_year_courses(query, context, year):
     user_id = query.from_user.id
     session = get_session(user_id)
@@ -498,12 +449,11 @@ async def show_year_courses(query, context, year):
     has_selection = len(session["selected"]) > 0
 
     year_label = YEAR_NAMES.get(year, f"السنة {year}")
-    text = f"مواد {year_label}\n\nاختر مادة:"
+    text = site_banner() + f"مواد {year_label}\n\nاختر مادة:"
     await query.edit_message_text(
         text,
         reply_markup=build_year_courses_keyboard(years_data, year, selected_codes, has_selection),
     )
-
 
 async def select_course(query, context, year, code):
     user_id = query.from_user.id
@@ -518,14 +468,7 @@ async def select_course(query, context, year, code):
     if (year, code) not in session["selected"]:
         session["selected"].append((year, code))
 
-    # نبقي المستخدم في شاشة مواد هذه السنة نفسها (لا نستخدم go_back)، لأنه
-    # قد يريد اختيار أكثر من مادة من نفس السنة متتاليًا -- إعادته لشاشة
-    # الاختيار بعد كل ضغطة كانت مرهقة له. شاشة الاختيار (selection) تبقى
-    # محفوظة في المكدّس كما هي (دُفعت إليه عند الدخول الأول لشاشة السنة
-    # في button_handler)، فزر "رجوع" يعمل بشكل صحيح تلقائيًا عندما يريد
-    # المستخدم اختيار سنة أخرى بنفسه.
     await show_year_courses(query, context, year)
-
 
 async def show_delete_menu(query, context):
     user_id = query.from_user.id
@@ -536,10 +479,9 @@ async def show_delete_menu(query, context):
         await go_back(query, context, user_id)
         return
 
-    text = "اختر المادة التي تريد حذفها من قائمة اختياراتك، أو اضغط رجوع للعودة بدون حذف:"
+    text = site_banner() + "اختر المادة التي تريد حذفها من قائمة اختياراتك، أو اضغط رجوع للعودة بدون حذف:"
     keyboard = build_delete_keyboard(years_data, session["selected"])
     await query.edit_message_text(text, reply_markup=keyboard)
-
 
 async def delete_course(query, context, year, code):
     user_id = query.from_user.id
@@ -547,9 +489,7 @@ async def delete_course(query, context, year, code):
     session["selected"] = [
         (y, c) for (y, c) in session["selected"] if not (y == year and c == code)
     ]
-    # الحذف يعيد المستخدم لنفس الشاشة التي جاء منها -- سلوك "رجوع" نفسه.
     await go_back(query, context, user_id)
-
 
 async def show_schedule(query, context):
     user_id = query.from_user.id
@@ -567,9 +507,6 @@ async def show_schedule(query, context):
         )
         return
 
-    # لا نُرسل الجدول كنصّ كامل في المحادثة (قد يكون طويلًا جدًا مع كثرة
-    # المواد)، نكتفي برسالة انتظار قصيرة، وكل التفاصيل تكون في ملف الـ PDF
-    # المرفق بعدها مباشرة.
     await query.edit_message_text("جاري تحضير ملف الجدول...\nيرجى الانتظار قليلاً.")
 
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -600,7 +537,6 @@ async def show_schedule(query, context):
     await context.bot.send_message(
         chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb
     )
-
 
 async def run_update_schedule(query, context):
     remaining = cooldown_remaining_seconds()
@@ -666,10 +602,7 @@ async def run_update_schedule(query, context):
     start_text, start_kb = start_text_and_keyboard(intro_note=note)
     await query.edit_message_text(start_text, reply_markup=start_kb)
 
-
 def build_optimized_status_text(result):
-    """رسالة نصية تُستخدم فقط في الحالات التي لا يُرسَل فيها أي ملف PDF
-    (فشل تام في إيجاد أي حل، أو انتهاء الوقت قبل التوصّل لنتيجة)."""
     if result["timed_out"] and not result["schedules"]:
         return (
             "انتهى وقت المعالجة قبل إيجاد جدول مثالي.\n"
@@ -684,11 +617,7 @@ def build_optimized_status_text(result):
         )
     return "لم يتمكن النظام من إيجاد أي جدول ممكن للمواد المختارة."
 
-
 def build_optimized_summary_text(result):
-    """رسالة قصيرة تُرسَل عند نجاح توليد الجدول، بدل الجدول الكامل نصًا
-    (الذي قد يكون طويلًا جدًا مع كثرة المواد) -- كل التفاصيل الكاملة
-    موجودة في ملف الـ PDF المرفق مباشرة بعدها."""
     best = result["schedules"][0]
     lines = ["تم إنشاء الجدول المثالي بنجاح."]
     lines.append(f"عدد أيام الحضور: {best['days_count']}")
@@ -711,11 +640,7 @@ def build_optimized_summary_text(result):
     lines.append("التفاصيل الكاملة مرفقة في ملف PDF أدناه.")
     return "\n".join(lines)
 
-
 async def send_all_times_pdf(query, context):
-    """يبني ويرسل PDF بأوقات جميع المواد من كل السنوات، ثم يعيد عرض نفس
-    شاشة الاختيار الحالية (لا يعتبر هذا تنقّلاً لشاشة جديدة، فلا يغيّر
-    مكدّس التنقّل)."""
     await query.answer()
     await query.edit_message_text("جاري تجميع أوقات جميع المواد في ملف PDF...\nقد يستغرق هذا لحظة.")
 
@@ -751,7 +676,6 @@ async def send_all_times_pdf(query, context):
     await context.bot.send_message(
         chat_id=query.message.chat_id, text=text, reply_markup=keyboard
     )
-
 
 async def optimize_schedule(query, context):
     user_id = query.from_user.id
@@ -824,7 +748,6 @@ async def optimize_schedule(query, context):
     start_text, start_kb = start_text_and_keyboard()
     await context.bot.send_message(chat_id=query.message.chat_id, text=start_text, reply_markup=start_kb)
 
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -832,10 +755,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("ضغطة زر من المستخدم %s: %s", query.from_user.id, data)
 
     user_id = query.from_user.id
+    
+    asyncio.create_task(maybe_announce_site(user_id, query.message.chat_id, context))
+    
+    username = query.from_user.username
     session = get_session(user_id)
 
     def _fire_log_event(event_type, value=""):
-        _log_user_event(user_id, query.from_user, event_type, value)
+        asyncio.create_task(asyncio.to_thread(notifier.log_event, user_id, username, event_type, value))
 
     if data == "back" or data == "go_start":
         _fire_log_event("back_button")
@@ -849,12 +776,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _fire_log_event("select_subject", course_name)
     elif data.startswith("delete_course:"):
         _fire_log_event("delete_subject")
-    elif data in ("show_schedule", "optimize_schedule",
-                  "send_all_times_pdf", "update_schedule"):
-        # الإنجازات التي تُحتسب في عدادات المستخدم. "إرسال أوقات جميع المواد"
-        # لم يكن يُتابَع إطلاقًا في النسخة السابقة، فصار أحد العدادات الثلاثة
-        # التي تظهر في رسالة كل مستخدم.
-        _fire_log_event(data)
+    elif data == "show_schedule":
+        _fire_log_event("show_schedule")
 
     if data == "update_cooldown":
         remaining = cooldown_remaining_seconds()
@@ -869,8 +792,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("mode:"):
-        # اختيار المسار من الشاشة الرئيسية: نحفظ الرئيسية في المكدّس قبل
-        # الانتقال، حتى يعمل "رجوع" من شاشة الاختيار بشكل صحيح.
         await query.answer()
         chosen_mode = data.split(":", 1)[1]
         push_screen(session, SCREEN_START)
@@ -929,51 +850,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "optimize_schedule":
+        _fire_log_event("optimize_schedule")
         await optimize_schedule(query, context)
         return
 
     await query.answer()
 
-
 async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج أخطاء عام: يُسجّل أي استثناء غير متوقّع حدث أثناء معالجة أي
-    تحديث (رسالة أو ضغطة زر) في الـ Logs بدل أن يختفي بصمت. هذا لا يُصلح
-    أي شيء بنفسه، لكنه يمنحنا رؤية واضحة لأي عطل مستقبلي فور حدوثه، بدل
-    اكتشافه بالصدفة لاحقًا من شكوى مستخدم."""
     logger.error("استثناء غير متوقّع أثناء معالجة تحديث %s", update, exc_info=context.error)
-
 
 async def healthcheck(request):
     return PlainTextResponse("OK")
-
-
-async def _refresh_dashboard_periodically():
-    """مهمة خلفية دائمة تُحدّث رسالة لوحة الإحصائيات في شات الإشعارات.
-
-    تعمل بمعزل عن مسار معالجة التحديثات: اللوحة يجب أن تبقى حديثة حتى حين لا
-    يضغط أحد أي زر (لتُظهر مثلًا من انقطع اتصاله)، فلا يمكن ربط تحديثها بوصول
-    حدث. مهمة واحدة كل دقيقة، ولا يُرسَل أي طلب إلى تيليغرام إن لم يتغير
-    محتوى اللوحة فعليًا.
-    """
-    while True:
-        try:
-            await asyncio.to_thread(notifier.refresh_dashboard)
-        except Exception:  # noqa: BLE001
-            logger.exception("فشل تحديث لوحة الإحصائيات (ستُعاد المحاولة)")
-        await asyncio.sleep(DASHBOARD_REFRESH_SECONDS)
-
-
-async def start_aux_services(app):
-    """يشغّل الخدمات المرافقة مرة واحدة بعد إقلاع التطبيق.
-
-    تُستدعى صراحةً من مسارَي التشغيل (webhook وpolling) بدل الاعتماد على
-    post_init وحده: PTB لا تُشغّل post_init إلا داخل run_polling/run_webhook
-    الجاهزتين، بينما وضع الـ webhook هنا مُدار يدويًا عبر starlette/uvicorn
-    (لأسباب موثّقة أعلى الملف) فلم يكن ليستدعيه أبدًا.
-    """
-    app.create_task(_refresh_dashboard_periodically())
-    notifier_admin.start_in_background(BOT_TOKEN)
-
 
 async def run_webhook_server(app):
     port = int(os.environ.get("PORT", "10000"))
@@ -983,11 +870,6 @@ async def run_webhook_server(app):
     secret_token = os.environ.get("WEBHOOK_SECRET") or None
 
     async def telegram_webhook(request):
-        # تحقّق من صحة الطلب عبر رأس X-Telegram-Bot-Api-Secret-Token: تيليغرام
-        # يرسل هذا الرأس تلقائيًا بالقيمة التي مرّرناها في secret_token عند
-        # setWebhook. هذا تحصين إضافي (لا علاقة له بمشكلة الانقطاعات نفسها)
-        # يمنع أي طرف يعرف رابط الـ webhook فقط (بدون التوكن السرّي) من إرسال
-        # تحديثات مزيّفة لبوتك.
         if secret_token:
             incoming_token = request.headers.get("x-telegram-bot-api-secret-token")
             if incoming_token != secret_token:
@@ -1020,9 +902,6 @@ async def run_webhook_server(app):
     logger.info("عنوان الـ Webhook: %s", webhook_url)
 
     async def _set_webhook_with_retries(*, drop_pending_updates):
-        """يستدعي setWebhook مع إعادة محاولة قصيرة عند أي فشل عابر (شبكة
-        بطيئة عند الإقلاع مثلاً)، بدل ترك الاستثناء يُسقط العملية بأكملها
-        من أول فشل."""
         last_exc = None
         for attempt in range(1, 4):
             try:
@@ -1041,13 +920,6 @@ async def run_webhook_server(app):
         raise last_exc
 
     async def _refresh_webhook_periodically():
-        """مهمة خلفية دائمة: تعيد تسجيل نفس عنوان الـ webhook بنفس
-        allowed_updates كل WEBHOOK_SELF_HEAL_INTERVAL_SECONDS، بدون
-        drop_pending_updates (حتى لا تُفقَد رسائل وصلت للتو من مستخدمين).
-        هذه حماية ذاتية ضد حالة "تيليغرام تستسلم عن الإرسال بعد عدة فشل
-        متتالٍ" الموثّقة رسميًا -- فتُصلح البوت نفسه تلقائيًا خلال دقائق
-        معدودة كحد أقصى، بدل الحاجة لاستدعاء setWebhook يدويًا كما كان
-        يحدث سابقًا."""
         while True:
             await asyncio.sleep(WEBHOOK_SELF_HEAL_INTERVAL_SECONDS)
             try:
@@ -1065,13 +937,7 @@ async def run_webhook_server(app):
 
     async with app:
         await app.start()
-        await start_aux_services(app)
 
-        # نُشغّل uvicorn كمهمة خلفية (بدل استدعاء serve() المباشر الذي
-        # يحجب التنفيذ) وننتظر فعليًا حتى يصبح جاهزًا لاستقبال الاتصالات
-        # (webserver.started) *قبل* إخبار تيليغرام بالبدء بالإرسال. هذا
-        # يُغلق تمامًا الفجوة الزمنية التي كانت تسبب خطأ "520" (انظر
-        # الشرح التفصيلي أعلى الملف).
         server_task = asyncio.create_task(webserver.serve())
         while not webserver.started:
             await asyncio.sleep(0.05)
@@ -1110,12 +976,7 @@ def main():
         app.add_error_handler(error_handler)
         asyncio.run(run_webhook_server(app))
     else:
-        app = (
-            Application.builder()
-            .token(BOT_TOKEN)
-            .post_init(start_aux_services)
-            .build()
-        )
+        app = Application.builder().token(BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("stats", stats))
         app.add_handler(CallbackQueryHandler(button_handler))
