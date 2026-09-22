@@ -30,6 +30,19 @@ notifier.py  (الإصدار 2 -- إعادة بناء كاملة)
     - الحفظ في Upstash يتم دفعة واحدة كل 30 ثانية (وفورًا عند انضمام
       مستخدم جديد)، فيبقى الاستهلاك بعيدًا جدًا عن حد الخطة المجانية.
 
+    ملاحظة إصلاح (مهمة): سابقًا كانت لوحة الإحصائيات العامة تُعطى الأولوية
+    المطلقة على رسائل المستخدمين الفردية في كل دورة (if dashboard_due:
+    ... elif candidates: ...). إن فشل تعديل رسالة اللوحة تحديدًا بشكل
+    *دائم* (وليس عابرًا) -- مثلًا بسبب حظر بوت الإشعارات، أو تغيّر
+    NOTIFIER_CHAT_ID، أو أي خطأ آخر غير "الرسالة غير موجودة" -- كان
+    النظام يدخل حلقة: يحاول اللوحة، يفشل، يوقف نفسه 10 ثوانٍ، ثم يحاول
+    اللوحة من جديد أولًا لأنها لا تزال "مستحقة"، وهكذا للأبد. النتيجة:
+    لا تُعدَّل أي رسالة مستخدم أبدًا (لا عدد الجداول ولا آخر نشاط)، رغم
+    أن العدّادات نفسها كانت تتحدّث بشكل صحيح تمامًا في الذاكرة وفي
+    Upstash. الإصلاح: (1) إعطاء الأولوية دائمًا لتحديث رسائل المستخدمين
+    على اللوحة، و(2) تباعد تصاعدي (exponential backoff) لإعادة محاولة
+    اللوحة عند الفشل بدل إعادة المحاولة كل 10 ثوانٍ للأبد.
+
 أين تُحفَظ بيانات المستخدمين؟
     في Upstash Redis (دائمة، لا تضيع بإعادة نشر Render):
       iust:users  -> Hash: كل مستخدم سجل JSON كامل
@@ -89,6 +102,11 @@ MIN_USER_EDIT_INTERVAL = 5       # أقل فاصل بين تعديلين لرس�
 MIN_DASHBOARD_INTERVAL = 20      # أقل فاصل بين تعديلين للوحة الإحصائيات
 LOAD_RETRY_INTERVAL = 30
 
+# سقف أقصى لفاصل إعادة محاولة اللوحة عند الفشل المتكرر (تباعد تصاعدي
+# بدل إعادة المحاولة كل MIN_DASHBOARD_INTERVAL ثانية للأبد، انظر الشرح
+# في أعلى الملف).
+DASHBOARD_MAX_BACKOFF_SECONDS = 30 * 60
+
 USERS_HASH = "iust:users"
 GLOBAL_KEY = "iust:global"
 MIGRATED_KEY = "iust:migrated_v2"
@@ -109,6 +127,7 @@ _global_dirty = False
 _urgent_persist = False
 _dashboard_dirty = False
 _dashboard_last = 0.0
+_dashboard_fail_streak = 0   # عدد مرات فشل تعديل اللوحة المتتالية
 _alerts = []
 _tg_blocked_until = 0.0
 _last_sweep = 0.0
@@ -580,7 +599,13 @@ def _render_user(uid):
 
 
 def _render_dashboard():
-    global _dashboard_dirty, _dashboard_last, _global_dirty, _urgent_persist
+    """يُعدّل رسالة لوحة الإحصائيات العامة (أو يُنشئها إن لم تكن موجودة).
+
+    عند الفشل، يزيد _dashboard_fail_streak بدل الاكتفاء بوضع علامة
+    "قذرة" فقط؛ هذا العدّاد يُستخدَم في _telegram_step لتباعد إعادة
+    المحاولة تصاعديًا، بدل إغراق تيليغرام بمحاولة كل عشرين ثانية للأبد
+    عندما يكون الفشل دائمًا لا عابرًا (انظر الشرح في أعلى الملف)."""
+    global _dashboard_dirty, _dashboard_last, _global_dirty, _urgent_persist, _dashboard_fail_streak
     now = time.time()
     with _lock:
         _dashboard_dirty = False
@@ -592,8 +617,10 @@ def _render_dashboard():
             _global_dirty = True
         if ok:
             _dashboard_last = now
+            _dashboard_fail_streak = 0
         else:
             _dashboard_dirty = True
+            _dashboard_fail_streak += 1
         if created:
             _urgent_persist = True
     if created and new_id:  # تثبيت لوحة الإحصائيات أعلى الشات (اختياري، الفشل غير مهم)
@@ -614,6 +641,17 @@ def _sweep_online(now):
 
 
 def _telegram_step(now):
+    """خطوة واحدة من الخيط الخلفي: إما تنبيه فوري، أو تعديل رسالة مستخدم،
+    أو تعديل لوحة الإحصائيات -- بحد أقصى تعديل واحد لكل استدعاء (حد
+    تيليغرام تقريبًا رسالة واحدة/ثانية).
+
+    الأولوية دائمًا لتحديث رسائل المستخدمين الفردية (candidates) على
+    لوحة الإحصائيات العامة (dashboard_due). هذا مقصود: لوحة الإحصائيات
+    تُعتبر "مستحقة" (dirty) عمليًا مع كل ضغطة زر تقريبًا، فلو أُعطيت
+    الأولوية (كما كان الحال سابقًا) وكان تعديلها يفشل بشكل دائم لأي سبب،
+    لَدخل النظام في حلقة تحاول اللوحة أولًا للأبد ولا تصل أبدًا لتحديث
+    أي رسالة مستخدم -- وهو بالضبط ما كان يُسبّب بقاء عدّادات الجداول
+    وآخر نشاط ثابتة عند الصفر رغم تحدّثها الصحيح في الذاكرة."""
     global _dashboard_dirty
     if not _notify_enabled:
         with _lock:
@@ -635,14 +673,21 @@ def _telegram_step(now):
         return
 
     with _lock:
-        dashboard_due = _dashboard_dirty and now - _dashboard_last >= MIN_DASHBOARD_INTERVAL
+        # تباعد تصاعدي لإعادة محاولة اللوحة عند الفشل المتكرر: 20 ثانية،
+        # 40، 80، ... حتى سقف DASHBOARD_MAX_BACKOFF_SECONDS.
+        backoff = min(
+            DASHBOARD_MAX_BACKOFF_SECONDS,
+            MIN_DASHBOARD_INTERVAL * (2 ** _dashboard_fail_streak),
+        )
+        dashboard_due = _dashboard_dirty and now - _dashboard_last >= backoff
         candidates = [(not important, first_ts, uid)
                       for uid, (first_ts, important) in _dirty_render.items()
                       if now - _last_render.get(uid, 0.0) >= MIN_USER_EDIT_INTERVAL]
-    if dashboard_due:
-        _render_dashboard()
-    elif candidates:
+
+    if candidates:
         _render_user(min(candidates)[2])
+    elif dashboard_due:
+        _render_dashboard()
 
 
 def _tick():
