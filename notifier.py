@@ -979,6 +979,25 @@ def set_note(user_id, note):
     return True
 
 
+SITE_ANNOUNCEMENT_FIELD = "site_announcement_sent"
+
+def has_announced_site(user_id):
+    """هل سبق أن أُرسل لهذا المستخدم إعلان الموقع الإلكتروني؟"""
+    record = load_user_record(user_id)
+    if record is None:
+        return False
+    return bool(record.get(SITE_ANNOUNCEMENT_FIELD))
+
+def mark_site_announced(user_id):
+    """يعلّم أن هذا المستخدم استلم إعلان الموقع، حتى لا يتكرر أبدًا."""
+    with _get_user_lock(user_id):
+        record = load_user_record(user_id)
+        if record is None:
+            return
+        record[SITE_ANNOUNCEMENT_FIELD] = True
+        save_user_record(user_id, record)
+
+
 def list_recent_users(limit=20):
     """آخر المستخدمين انضمامًا (من الفهرس، دون مسح كل المفاتيح)."""
     raw = _redis_call("ZREVRANGE", USERS_INDEX_KEY, 0, max(0, limit - 1)) or []

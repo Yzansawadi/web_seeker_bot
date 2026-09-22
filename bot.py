@@ -165,6 +165,13 @@ YEAR_NAMES = {
     5: "السنة الخامسة",
 }
 
+# رابط الموقع الإلكتروني المرافق للبوت -- عدّل هذا لرابطك الفعلي
+SITE_URL = "https://web-seeker-site.onrender.com/"
+
+def site_banner():
+    """شريط أنيق يظهر أعلى كل شاشة/قائمة في البوت."""
+    return f"🌐 جرّب الموقع الإلكتروني:\n{SITE_URL}\n{'—' * 25}\n\n"
+
 # ---------------------------------------------------------------------------
 # حالة كل مستخدم (في الذاكرة فقط، تُفقد عند إعادة تشغيل البوت)
 # ---------------------------------------------------------------------------
@@ -201,6 +208,39 @@ def track_user(user):
     asyncio.create_task(
         asyncio.to_thread(notifier.touch, user.id, user.username, user.full_name)
     )
+
+# احتياط بالذاكرة فقط: يمنع تكرار الإعلان خلال عمر هذا التشغيل تحديدًا إن لم
+# يكن Upstash Redis مفعّلًا. مع تفعيل Redis، يُحفَظ القرار بشكل دائم في
+# notifier.py ولا يتكرر أبدًا حتى بعد إعادة التشغيل.
+_site_announced_locally = set()
+
+async def maybe_announce_site(user_id, chat_id, context):
+    """يرسل إعلان الموقع الإلكتروني مرة واحدة فقط لكل مستخدم على الإطلاق،
+    مهما تكرر استخدامه للبوت بعد ذلك."""
+    # تأكد من أن الدالة has_announced_site و mark_site_announced موجودتان في ملف notifier.py
+    try:
+        already = await asyncio.to_thread(notifier.has_announced_site, user_id)
+    except AttributeError:
+        # كإجراء وقائي في حال لم تكن الدالة مضافة بعد لملف notifier
+        already = False
+
+    if already or user_id in _site_announced_locally:
+        return
+        
+    _site_announced_locally.add(user_id)
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"أصبح لدينا الآن موقع إلكتروني يمكنك تجربته:\n{SITE_URL}",
+        )
+    except Exception:
+        logger.exception("فشل إرسال إعلان الموقع للمستخدم %s", user_id)
+        return
+        
+    try:
+        await asyncio.to_thread(notifier.mark_site_announced, user_id)
+    except AttributeError:
+        pass
 
 
 def _log_user_event(user_id, user, event_type, value=""):
@@ -437,13 +477,13 @@ def format_course_info(course):
 # ---------------------------------------------------------------------------
 
 def start_text_and_keyboard(intro_note=""):
-    text = intro_note or "اختر ما تريد القيام به:"
+    text = site_banner() + (intro_note or "اختر ما تريد القيام به:")
     return text, build_start_keyboard()
 
 
 def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
     has_selection = len(selected_list) > 0
-    text = intro_note
+    text = site_banner() + intro_note
     text += selected_courses_block(years_data, selected_list)
 
     if not schedule_file_exists():
@@ -466,6 +506,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = update.effective_user
     track_user(user)
+    
+    # إعلان الموقع الجديد
+    asyncio.create_task(maybe_announce_site(user_id, update.message.chat_id, context))
+    
     _log_user_event(user_id, user, "start_command")
     reset_session(user_id)
     text, keyboard = start_text_and_keyboard(intro_note=" اهلا بك في بوت websseker. \n\n")
@@ -498,7 +542,7 @@ async def show_year_courses(query, context, year):
     has_selection = len(session["selected"]) > 0
 
     year_label = YEAR_NAMES.get(year, f"السنة {year}")
-    text = f"مواد {year_label}\n\nاختر مادة:"
+    text = site_banner() + f"مواد {year_label}\n\nاختر مادة:"
     await query.edit_message_text(
         text,
         reply_markup=build_year_courses_keyboard(years_data, year, selected_codes, has_selection),
@@ -536,7 +580,7 @@ async def show_delete_menu(query, context):
         await go_back(query, context, user_id)
         return
 
-    text = "اختر المادة التي تريد حذفها من قائمة اختياراتك، أو اضغط رجوع للعودة بدون حذف:"
+    text = site_banner() + "اختر المادة التي تريد حذفها من قائمة اختياراتك، أو اضغط رجوع للعودة بدون حذف:"
     keyboard = build_delete_keyboard(years_data, session["selected"])
     await query.edit_message_text(text, reply_markup=keyboard)
 
@@ -833,6 +877,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     session = get_session(user_id)
+    
+    # إعلان الموقع الجديد
+    asyncio.create_task(maybe_announce_site(user_id, query.message.chat_id, context))
 
     def _fire_log_event(event_type, value=""):
         _log_user_event(user_id, query.from_user, event_type, value)
