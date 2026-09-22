@@ -109,6 +109,7 @@ from telegram.ext import (
 import schedule_data as sd
 import pdf_export
 import notifier
+import notifier_admin
 import schedule_optimizer as opt
 
 try:
@@ -153,6 +154,9 @@ WEBHOOK_ALLOWED_UPDATES = ["message", "callback_query"]
 # كحماية ذاتية دائمة (انظر التعليق التفصيلي أعلى الملف، النقطة 3).
 WEBHOOK_SELF_HEAL_INTERVAL_SECONDS = 20 * 60
 
+# كل كم ثانية تُحدَّث رسالة لوحة الإحصائيات في شات الإشعارات.
+DASHBOARD_REFRESH_SECONDS = 60
+
 YEAR_NAMES = {
     1: "السنة الأولى",
     2: "السنة الثانية",
@@ -171,20 +175,43 @@ YEAR_NAMES = {
 # }
 user_sessions = {}
 
+# مستخدمون ظهروا منذ بدء هذه العملية — للـ logs المحلية فقط. ليست مصدر
+# الحقيقة عن "من جديد"، فذلك تقرره بيانات Redis الدائمة (انظر track_user).
 seen_users = set()
 _bot_start_time = datetime.now(timezone.utc)
 
 
 def track_user(user):
-    is_new = user.id not in seen_users
+    """نبضة متابعة تُرسَل عند كل تفاعل مع البوت (أمر أو ضغطة زر).
+
+    `seen_users` هنا للـ logs فقط. القرار الحقيقي "هل هذا مستخدم جديد؟" تتخذه
+    notifier.touch من Redis نفسه: إن وُجد سجل فُتح، وإن لم يوجد أُنشئ ورقمه
+    الدائم خُصّص. هذا يفرّق جوهريًا عن السلوك السابق الذي كان يعتبر كل من ليس
+    في `seen_users` جديدًا ويستدعي register_new_user — أي أن كل إعادة تشغيل على
+    Render كانت تمحو سجلات المستخدمين القدامى وعداداتهم.
+
+    الدالة idempotent وآمنة للاستدعاء المتكرر، وnotifier.touch تخنق كتابات
+    الحضور داخليًا (كل 20 ثانية لكل مستخدم) فلا تُشكّل هذه النبضات حملًا.
+    """
+    is_new_locally = user.id not in seen_users
     seen_users.add(user.id)
-    if is_new:
-        name = user.full_name or user.username or str(user.id)
-        logger.info("مستخدم جديد بدأ استخدام البوت: %s (المعرف: %s) | إجمالي المستخدمين منذ آخر تشغيل: %s",
-                    name, user.id, len(seen_users))
-        asyncio.create_task(
-            asyncio.to_thread(notifier.register_new_user, user.id, user.username)
-        )
+    if is_new_locally:
+        logger.info("مستخدم بدأ استخدام البوت: %s (المعرف: %s)",
+                    user.full_name or user.username or str(user.id), user.id)
+    asyncio.create_task(
+        asyncio.to_thread(notifier.touch, user.id, user.username, user.full_name)
+    )
+
+
+def _log_user_event(user_id, user, event_type, value=""):
+    """يسجّل حدثًا حقيقيًا (لا مجرد تنقّل) في نظام المتابعة.
+
+    يُطلَق كمهمة خلفية حتى لا ينتظر المستخدم أي طلب شبكي إلى Redis أو تيليغرام،
+    وحتى لا يُعطّل عطلٌ في خدمة خارجية استخدام البوت إطلاقًا.
+    """
+    asyncio.create_task(asyncio.to_thread(
+        notifier.log_event, user_id, user.username, event_type, value, user.full_name
+    ))
 
 
 def get_session(user_id):
@@ -437,7 +464,9 @@ def selection_text_and_keyboard(years_data, mode, selected_list, intro_note=""):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    track_user(update.effective_user)
+    user = update.effective_user
+    track_user(user)
+    _log_user_event(user_id, user, "start_command")
     reset_session(user_id)
     text, keyboard = start_text_and_keyboard(intro_note=" اهلا بك في بوت websseker. \n\n")
     await update.message.reply_text(text, reply_markup=keyboard)
@@ -803,11 +832,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("ضغطة زر من المستخدم %s: %s", query.from_user.id, data)
 
     user_id = query.from_user.id
-    username = query.from_user.username
     session = get_session(user_id)
 
     def _fire_log_event(event_type, value=""):
-        asyncio.create_task(asyncio.to_thread(notifier.log_event, user_id, username, event_type, value))
+        _log_user_event(user_id, query.from_user, event_type, value)
 
     if data == "back" or data == "go_start":
         _fire_log_event("back_button")
@@ -821,8 +849,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _fire_log_event("select_subject", course_name)
     elif data.startswith("delete_course:"):
         _fire_log_event("delete_subject")
-    elif data == "show_schedule":
-        _fire_log_event("show_schedule")
+    elif data in ("show_schedule", "optimize_schedule",
+                  "send_all_times_pdf", "update_schedule"):
+        # الإنجازات التي تُحتسب في عدادات المستخدم. "إرسال أوقات جميع المواد"
+        # لم يكن يُتابَع إطلاقًا في النسخة السابقة، فصار أحد العدادات الثلاثة
+        # التي تظهر في رسالة كل مستخدم.
+        _fire_log_event(data)
 
     if data == "update_cooldown":
         remaining = cooldown_remaining_seconds()
@@ -897,7 +929,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "optimize_schedule":
-        _fire_log_event("optimize_schedule")
         await optimize_schedule(query, context)
         return
 
@@ -914,6 +945,34 @@ async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def healthcheck(request):
     return PlainTextResponse("OK")
+
+
+async def _refresh_dashboard_periodically():
+    """مهمة خلفية دائمة تُحدّث رسالة لوحة الإحصائيات في شات الإشعارات.
+
+    تعمل بمعزل عن مسار معالجة التحديثات: اللوحة يجب أن تبقى حديثة حتى حين لا
+    يضغط أحد أي زر (لتُظهر مثلًا من انقطع اتصاله)، فلا يمكن ربط تحديثها بوصول
+    حدث. مهمة واحدة كل دقيقة، ولا يُرسَل أي طلب إلى تيليغرام إن لم يتغير
+    محتوى اللوحة فعليًا.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(notifier.refresh_dashboard)
+        except Exception:  # noqa: BLE001
+            logger.exception("فشل تحديث لوحة الإحصائيات (ستُعاد المحاولة)")
+        await asyncio.sleep(DASHBOARD_REFRESH_SECONDS)
+
+
+async def start_aux_services(app):
+    """يشغّل الخدمات المرافقة مرة واحدة بعد إقلاع التطبيق.
+
+    تُستدعى صراحةً من مسارَي التشغيل (webhook وpolling) بدل الاعتماد على
+    post_init وحده: PTB لا تُشغّل post_init إلا داخل run_polling/run_webhook
+    الجاهزتين، بينما وضع الـ webhook هنا مُدار يدويًا عبر starlette/uvicorn
+    (لأسباب موثّقة أعلى الملف) فلم يكن ليستدعيه أبدًا.
+    """
+    app.create_task(_refresh_dashboard_periodically())
+    notifier_admin.start_in_background(BOT_TOKEN)
 
 
 async def run_webhook_server(app):
@@ -1006,6 +1065,7 @@ async def run_webhook_server(app):
 
     async with app:
         await app.start()
+        await start_aux_services(app)
 
         # نُشغّل uvicorn كمهمة خلفية (بدل استدعاء serve() المباشر الذي
         # يحجب التنفيذ) وننتظر فعليًا حتى يصبح جاهزًا لاستقبال الاتصالات
@@ -1050,7 +1110,12 @@ def main():
         app.add_error_handler(error_handler)
         asyncio.run(run_webhook_server(app))
     else:
-        app = Application.builder().token(BOT_TOKEN).build()
+        app = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .post_init(start_aux_services)
+            .build()
+        )
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("stats", stats))
         app.add_handler(CallbackQueryHandler(button_handler))
