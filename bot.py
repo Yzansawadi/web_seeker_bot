@@ -159,7 +159,10 @@ def notify_dashboard(user_id, full_name, username="", schedule_type="ideal"):
             # قد تحتاج عدة ثوانٍ للإقلاع البارد فتفشل مهلة الثلاث ثوانٍ.
             r = requests.post(DASHBOARD_URL, json=payload, timeout=10)
             if r.status_code >= 400:
-                logger.warning("اللوحة رفضت الطلب (الحالة %s): %s", r.status_code, r.text[:200])
+                logger.warning(
+                    "اللوحة رفضت الطلب (الحالة %s) | الرابط النهائي: %s | تحويلات: %s | الرد: %s",
+                    r.status_code, r.url, [h.status_code for h in r.history], r.text[:120],
+                )
             else:
                 logger.info("تم إرسال النشاط إلى اللوحة (الحالة %s)", r.status_code)
         except Exception as exc:
