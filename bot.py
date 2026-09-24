@@ -155,9 +155,16 @@ def notify_dashboard(user_id, full_name, username="", schedule_type="ideal"):
             "scheduleType": schedule_type
         }
         try:
-            requests.post(DASHBOARD_URL, json=payload, timeout=3)
-        except Exception:
-            pass  # لا يجب أن يتوقف البوت إن انقطعت الشبكة
+            # مهلة 10 ثوانٍ: الخيط خلفي فلا يؤخر البوت، وخدمات مثل Cloud Run
+            # قد تحتاج عدة ثوانٍ للإقلاع البارد فتفشل مهلة الثلاث ثوانٍ.
+            r = requests.post(DASHBOARD_URL, json=payload, timeout=10)
+            if r.status_code >= 400:
+                logger.warning("اللوحة رفضت الطلب (الحالة %s): %s", r.status_code, r.text[:200])
+            else:
+                logger.info("تم إرسال النشاط إلى اللوحة (الحالة %s)", r.status_code)
+        except Exception as exc:
+            # لا يجب أن يتوقف البوت إن انقطعت الشبكة، لكن نسجّل السبب في الـ Logs.
+            logger.warning("تعذّر الوصول إلى اللوحة: %s", exc)
 
     threading.Thread(target=_send, daemon=True).start()
 
