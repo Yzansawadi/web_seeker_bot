@@ -88,6 +88,8 @@ import logging
 import subprocess
 import sys
 import asyncio
+import threading
+import requests
 from datetime import datetime, timezone
 
 for _stream_name in ("stdout", "stderr"):
@@ -128,6 +130,37 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# رابط لوحة المراقبة المباشرة (يمكن تغييره من متغير بيئة على Render دون تعديل الكود)
+DASHBOARD_URL = os.environ.get(
+    "DASHBOARD_URL",
+    "https://ais-pre-644fqsjp5hnrfiiwh2afju-301922375646.europe-west2.run.app/api/webhook/activity",
+)
+
+
+def notify_dashboard(user_id, full_name, username="", schedule_type="ideal"):
+    """إرسال نشاط الطالب إلى لوحة التحكم في خيط خلفي دون تأخير رد البوت."""
+    def _send():
+        titles = {
+            'ideal': 'إنشاء جدول مواد',
+            'simplified': 'إنشاء جدول اوقات',
+            'full': 'استعراض جدول كل المواد'
+        }
+        payload = {
+            "telegramId": str(user_id),
+            "userName": full_name or "طالب",
+            "username": username or "",
+            "action": f"generate_{schedule_type}_schedule",
+            "actionTitle": titles.get(schedule_type, "طلب جدول"),
+            "scheduleType": schedule_type
+        }
+        try:
+            requests.post(DASHBOARD_URL, json=payload, timeout=3)
+        except Exception:
+            pass  # لا يجب أن يتوقف البوت إن انقطعت الشبكة
+
+    threading.Thread(target=_send, daemon=True).start()
+
 
 # ---------------------------------------------------------------------------
 # الإعدادات
@@ -626,6 +659,12 @@ async def show_schedule(query, context):
                 document=f,
                 filename="times_schedule.pdf",
             )
+        notify_dashboard(
+            user_id=query.from_user.id,
+            full_name=query.from_user.full_name,
+            username=query.from_user.username,
+            schedule_type="simplified",
+        )
     except Exception:
         logger.exception("فشل إنشاء أو إرسال ملف PDF للجدول")
         await context.bot.send_message(
@@ -777,6 +816,12 @@ async def send_all_times_pdf(query, context):
                 filename="all_course_times.pdf",
                 caption="أوقات جميع المواد الدراسية",
             )
+        notify_dashboard(
+            user_id=query.from_user.id,
+            full_name=query.from_user.full_name,
+            username=query.from_user.username,
+            schedule_type="full",
+        )
     except Exception:
         logger.exception("فشل إنشاء أو إرسال PDF جميع الأوقات")
         await context.bot.send_message(
@@ -855,6 +900,12 @@ async def optimize_schedule(query, context):
                     filename="webseeker_schedule.pdf",
                     caption="الجدول المثالي بصيغة PDF",
                 )
+            notify_dashboard(
+                user_id=query.from_user.id,
+                full_name=query.from_user.full_name,
+                username=query.from_user.username,
+                schedule_type="ideal",
+            )
         except Exception:
             logger.exception("فشل إنشاء أو إرسال PDF الجدول المثالي")
         finally:
