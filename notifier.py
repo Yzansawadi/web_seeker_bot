@@ -212,12 +212,24 @@ def _redis_pipeline(commands):
                            response.status_code, response.text[:300])
             return None
         data = response.json()
-        # Upstash يعيد الشكل {"results": [{"status":..., "result":...}, ...]}
-        # وبعض النسخ تعيد {"result": [...]} مباشرة، فندعم الاثنين.
-        if isinstance(data.get("results"), list):
-            return [item.get("result") for item in data["results"]]
-        return data.get("result")
-    except requests.RequestException:
+        # Upstash يردّ على /pipeline بقائمة مباشرة: [{"result": ...}, ...]
+        # (وهذا ما يحدث فعليًا؛ الافتراض السابق أن الرد قاموس كان يُسقط
+        # الدالة بـ AttributeError بعد تنفيذ الأوامر، فلا تصل الأسطر التالية
+        # لها مثل _schedule_push). ندعم أيضًا الشكل القاموسي القديم.
+        if isinstance(data, dict):
+            data = data.get("results", data.get("result"))
+        if not isinstance(data, list):
+            return None
+        results = []
+        for item in data:
+            if isinstance(item, dict):
+                if item.get("error"):
+                    logger.warning("أمر داخل Upstash pipeline فشل: %s", item["error"])
+                results.append(item.get("result"))
+            else:
+                results.append(item)
+        return results
+    except (requests.RequestException, ValueError):
         logger.exception("خطأ في الاتصال بـ Upstash Redis (pipeline)")
         return None
 
