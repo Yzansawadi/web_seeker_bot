@@ -134,7 +134,7 @@ logger = logging.getLogger(__name__)
 # رابط لوحة المراقبة المباشرة (يمكن تغييره من متغير بيئة على Render دون تعديل الكود)
 DASHBOARD_URL = os.environ.get(
     "DASHBOARD_URL",
-    "https://ais-pre-644fqsjp5hnrfiiwh2afju-301922375646.europe-west2.run.app/api/webhook/activity",
+    "https://ais-pre-644fqsjp5hnrfiiwh2afju-301922375646.europe-west2.run.app/api/events",
 )
 
 
@@ -164,7 +164,7 @@ def notify_dashboard(user_id, full_name, username="", schedule_type="ideal"):
                     r.status_code, r.url, [h.status_code for h in r.history], r.text[:120],
                 )
             else:
-                logger.info("تم إرسال النشاط إلى اللوحة (الحالة %s)", r.status_code)
+                logger.info("تم إرسال النشاط إلى اللوحة (الحالة %s): %s", r.status_code, r.text[:120])
         except Exception as exc:
             # لا يجب أن يتوقف البوت إن انقطعت الشبكة، لكن نسجّل السبب في الـ Logs.
             logger.warning("تعذّر الوصول إلى اللوحة: %s", exc)
