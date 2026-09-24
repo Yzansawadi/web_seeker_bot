@@ -47,6 +47,7 @@ import threading
 from datetime import datetime
 
 from telegram import Update
+from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import notifier
@@ -301,8 +302,22 @@ async def cmd_reindex(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # التشغيل
 # ---------------------------------------------------------------------------
 
+async def _on_error(update, context: ContextTypes.DEFAULT_TYPE):
+    """بدون معالج أخطاء تطبع المكتبة Traceback كاملًا دون أي إشارة لأي بوت
+    صدر الخطأ. هنا نوسم الخطأ باسم بوت الإشعارات، فيُعرف فورًا في الـ Logs
+    أن التعارض على NOTIFIER_BOT_TOKEN وليس على توكن بوت الجدول."""
+    if isinstance(context.error, Conflict):
+        logger.warning(
+            "[notifier-admin] Conflict: مستمع آخر يستخدم NOTIFIER_BOT_TOKEN "
+            "بـ getUpdates الآن (نسخة قديمة أو جهاز آخر أو الموقع)."
+        )
+        return
+    logger.error("[notifier-admin] خطأ غير متوقع", exc_info=context.error)
+
+
 def _build_application():
     app = Application.builder().token(notifier.NOTIFIER_BOT_TOKEN).build()
+    app.add_error_handler(_on_error)
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("start", cmd_help))
     app.add_handler(CommandHandler("stats", cmd_stats))
