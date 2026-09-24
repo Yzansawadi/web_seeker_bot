@@ -329,6 +329,19 @@ def _build_application():
     return app
 
 
+def _on_polling_error(exc):
+    """يُمرَّر إلى start_polling: الـ Updater يسجّل أخطاء getUpdates بنفسه (وبـ
+    Traceback كامل) ولا يمرّ بمعالجات الأخطاء العادية، فلا بد من هذا الاستدعاء
+    المباشر. دالة عادية (لا async) كما تشترط المكتبة."""
+    if isinstance(exc, Conflict):
+        logger.warning(
+            "[notifier-admin] Conflict: مستمع آخر يستخدم NOTIFIER_BOT_TOKEN "
+            "بـ getUpdates الآن."
+        )
+        return
+    logger.error("[notifier-admin] خطأ أثناء polling", exc_info=exc)
+
+
 async def _run_polling(app):
     """يشغّل التطبيق دون Application.run_polling() — انظر الشرح أعلى الملف."""
     await app.initialize()
@@ -339,6 +352,7 @@ async def _run_polling(app):
     await app.updater.start_polling(
         allowed_updates=["message"],
         drop_pending_updates=False,
+        error_callback=_on_polling_error,
     )
     logger.info("بوت أوامر الإدارة يعمل (long polling).")
     while True:
